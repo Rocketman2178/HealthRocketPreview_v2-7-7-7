@@ -149,7 +149,7 @@ export function CoreDashboard() {
         <div className="fixed bottom-4 left-4 z-50 max-w-md bg-gray-800 rounded-lg shadow-lg border border-yellow-500/30 p-4 animate-[bounceIn_0.5s_ease-out]">
           <div className="flex items-start gap-3">
             <div className="p-2 bg-yellow-500/20 rounded-full">
-              <AlertTriangle className="text-yellow-500\" size={20} />
+              <AlertTriangle className="text-yellow-500" size={20} />
             </div>
             <div className="flex-1">
               <div className="flex justify-between items-start">
@@ -293,6 +293,7 @@ export function CoreDashboard() {
                     scrollToSection("challenges");
                   } else if (tab === "boosts") {
                     scrollToSection("boosts");
+                  }
                 }, 100);
               }}
             />
