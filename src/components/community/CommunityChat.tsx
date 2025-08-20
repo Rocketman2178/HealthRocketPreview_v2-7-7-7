@@ -266,11 +266,34 @@ export function useCommunityOperations() {
     setLoading(true);
     setError(null);
     
-    try {
-      const result = await callEdgeFunction<{ reaction_added: boolean }>(
-        'toggle_reaction',
-      )
+        { messageId },
+        'POST'
+      );
+      
+      // Invalidate reactions cache for this message
+      CommunityCache.invalidate(`reactions_${messageId}`);
+      
+      return result;
+    } catch (err) {
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
     }
+  }, [callEdgeFunction]);
+  
+  // Clear cache for a specific key or all cache
+  const clearCache = useCallback((key?: string) => {
+    if (key) {
+      CommunityCache.invalidate(key);
+    } else {
+      CommunityCache.clear();
+    }
+  }, []);
+  
+  return {
+    loading,
     error,
     verifyCommunityMembership,
     getCommunityMembers,
@@ -278,5 +301,4 @@ export function useCommunityOperations() {
     toggleMessageReaction,
     clearCache
   };
-  )
 }
