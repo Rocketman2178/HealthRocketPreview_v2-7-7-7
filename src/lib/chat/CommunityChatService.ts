@@ -1,282 +1,389 @@
-import { useState, useCallback, useRef } from 'react';
-import { useSupabase } from '../contexts/SupabaseContext';
-    const startTime = Date.now();
-import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
-import { CommunityCache } from '../lib/cache/CommunityCache';
-import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
-import { CommunityCache } from '../lib/cache/CommunityCache';
-import type { 
-  CommunityOperationResult, 
-  MessageReactionData, 
-  CommunityMemberData,
-  CommunityOperationError 
-} from '../types/community';
+import { supabase } from '../supabase';
+import type { CommunityMessage, CommunityMember } from '../../types/community';
 
+export class CommunityChatService {
+  /**
+   * Get messages for a community
+   */
+  static async getMessages(
+    communityId: string, 
+    limit: number = 50, 
+    offset: number = 0
+  ): Promise<CommunityMessage[]> {
+    try {
+      const { data, error } = await supabase.rpc('get_community_chat_messages', {
+        p_community_id: communityId,
+        p_limit: limit,
+        p_offset: offset
+      });
 
-export function useCommunityOperations() {
-  const { user } = useSupabase();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<CommunityOperationError | null>(null);
-  
-  // Generic Edge Function caller with retry logic
-  const callEdgeFunction = useCallback(async <T>(
-    operation: string,
-    params: Record<string, any> = {},
-    method: 'GET' | 'POST' = 'GET',
-    maxRetries: number = 3
-  ): Promise<CommunityOperationResult<T>> => {
-    if (!user) {
-      return { success: false, error: 'User not authenticated' };
+      if (error) throw error;
+
+      if (!data || !Array.isArray(data)) {
+        return [];
+      }
+
+      // Transform and sort messages oldest first (for proper chat order)
+      return data
+        .map(msg => ({
+          id: msg.id,
+          communityId: msg.community_id,
+          userId: msg.user_id,
+          content: msg.content,
+          mediaUrl: msg.media_url,
+          mediaType: msg.media_type,
+          parentMessageId: msg.parent_message_id,
+          parentMessage: msg.parent_message_id ? {
+            id: msg.parent_message_id,
+            content: msg.parent_content || '',
+            userId: msg.parent_user_id || '',
+            userName: msg.parent_user_name || '',
+            isVerification: false,
+            mediaUrl: msg.parent_media_url,
+            mediaType: msg.parent_media_type
+          } : undefined,
+          replyCount: msg.reply_count || 0,
+          createdAt: new Date(msg.created_at),
+          updatedAt: new Date(msg.updated_at),
+          userName: msg.user_name || 'Unknown User',
+          userAvatarUrl: msg.user_avatar_url
+        }))
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()); // Oldest first
+    } catch (err) {
+      console.error('Error fetching community messages:', err);
+      throw err;
     }
-    
-    const startTime = Date.now();
-    let lastError: Error | null = null;
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
-          throw new Error('No active session');
+  }
+
+  /**
+   * Send a message to a community
+   */
+  static async sendMessage(
+    userId: string,
+    communityId: string,
+    content: string,
+    mediaUrl?: string,
+    mediaType?: 'image' | 'video',
+    parentMessageId?: string
+  ): Promise<CommunityMessage> {
+    try {
+      // Get user details first
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('name, avatar_url')
+        .eq('id', userId)
+        .single();
+
+      if (userError) throw userError;
+
+      // Get parent message details if replying
+      let parentMessage = undefined;
+      if (parentMessageId) {
+        const { data: parentData, error: parentError } = await supabase
+          .from('community_chat_messages')
+          .select('id, content, user_id, user_name, media_url, media_type')
+          .eq('id', parentMessageId)
+          .single();
+
+        if (!parentError && parentData) {
+          parentMessage = {
+            id: parentData.id,
+            content: parentData.content,
+            userId: parentData.user_id,
+            userName: parentData.user_name || 'Unknown User',
+            isVerification: false,
+            mediaUrl: parentData.media_url,
+            mediaType: parentData.media_type
+          };
         }
-        
-        // Build URL with query params for GET requests
-        const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations`);
-        url.searchParams.set('operation', operation);
-        
-        if (method === 'GET') {
-          Object.entries(params).forEach(([key, value]) => {
-            if (value !== undefined && value !== null) {
-              url.searchParams.set(key, String(value));
-            }
+      }
+
+      // Insert the message
+      const { data: newMessage, error: insertError } = await supabase
+        .from('community_chat_messages')
+        .insert({
+          user_id: userId,
+          community_id: communityId,
+          content: content.trim(),
+          media_url: mediaUrl,
+          media_type: mediaType,
+          parent_message_id: parentMessageId,
+          user_name: userData.name || 'Unknown User'
+        })
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      return {
+        id: newMessage.id,
+        communityId: newMessage.community_id,
+        userId: newMessage.user_id,
+        content: newMessage.content,
+        mediaUrl: newMessage.media_url,
+        mediaType: newMessage.media_type,
+        parentMessageId: newMessage.parent_message_id,
+        parentMessage,
+        replyCount: 0,
+        createdAt: new Date(newMessage.created_at),
+        updatedAt: new Date(newMessage.updated_at),
+        userName: userData.name || 'Unknown User',
+        userAvatarUrl: userData.avatar_url
+      };
+    } catch (err) {
+      console.error('Error sending community message:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Delete a message
+   */
+  static async deleteMessage(messageId: string, userId: string): Promise<void> {
+    try {
+      const { error } = await supabase
+        .from('community_chat_messages')
+        .delete()
+        .eq('id', messageId)
+        .eq('user_id', userId); // Users can only delete their own messages
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('Error deleting community message:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Toggle reaction on a message
+   */
+  static async toggleReaction(messageId: string, userId: string): Promise<boolean> {
+    try {
+      // Check if user already reacted
+      const { data: existingReaction, error: checkError } = await supabase
+        .from('community_message_reactions')
+        .select('id')
+        .eq('message_id', messageId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (checkError) throw checkError;
+
+      if (existingReaction) {
+        // Remove reaction
+        const { error: deleteError } = await supabase
+          .from('community_message_reactions')
+          .delete()
+          .eq('id', existingReaction.id);
+
+        if (deleteError) throw deleteError;
+        return false; // Reaction removed
+      } else {
+        // Add reaction
+        const { error: insertError } = await supabase
+          .from('community_message_reactions')
+          .insert({
+            message_id: messageId,
+            user_id: userId
           });
-        }
-        
-        const requestOptions: RequestInit = {
-          method,
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          // Add timeout
-          signal: AbortSignal.timeout(10000)
-        };
-        
-        if (method === 'POST') {
-          requestOptions.body = JSON.stringify(params);
-        }
-        
-        const response = await fetch(url.toString(), requestOptions);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errorText}`);
-        }
-        
-        const data = await response.json();
-        
-        if (!data.success) {
-          const error = new Error(data.error || 'Operation failed') as CommunityOperationError;
-          error.retryable = response.status >= 500; // Server errors are retryable
-          throw error;
-        }
-        
-        // Track successful operation
-        CommunityAnalytics.trackPerformance(
-          operation,
-          startTime,
-          true,
-          undefined,
-          user.id,
-          params.community_id
-        );
-        
-        // Track successful operation
-        CommunityAnalytics.trackPerformance(
-          operation,
-          startTime,
-          true,
-          undefined,
-          user.id,
-          params.community_id
-        );
-        
-        return { success: true, data: data };
-      } catch (err) {
-        lastError = err as Error;
-        
-        // Don't retry on client errors (4xx) or authentication errors
-        if (err instanceof Error) {
-          const isRetryable = (err as CommunityOperationError).retryable !== false &&
-                             !err.message.includes('authentication') &&
-                             !err.message.includes('not a member');
-          
-          if (!isRetryable || attempt === maxRetries - 1) {
-            break;
+
+        if (insertError) throw insertError;
+        return true; // Reaction added
+      }
+    } catch (err) {
+      console.error('Error toggling reaction:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get reactions for a message
+   */
+  static async getMessageReactions(messageId: string): Promise<any[]> {
+    try {
+      const { data, error } = await supabase
+        .from('community_message_reactions')
+        .select(`
+          id,
+          user_id,
+          created_at,
+          users:user_id (
+            name
+          )
+        `)
+        .eq('message_id', messageId);
+
+      if (error) throw error;
+      return data || [];
+    } catch (err) {
+      console.error('Error fetching message reactions:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get community members for mentions
+   */
+  static async getCommunityMembers(communityId: string): Promise<CommunityMember[]> {
+    try {
+      const { data, error } = await supabase
+        .from('community_memberships')
+        .select(`
+          user_id,
+          users:user_id (
+            id,
+            name,
+            avatar_url
+          )
+        `)
+        .eq('community_id', communityId);
+
+      if (error) throw error;
+
+      return data?.map(membership => ({
+        id: membership.users.id,
+        name: membership.users.name || 'Unknown User',
+        avatarUrl: membership.users.avatar_url
+      })) || [];
+    } catch (err) {
+      console.error('Error fetching community members:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get unread mention count for a user
+   */
+  static async getUnreadMentionCount(userId: string): Promise<number> {
+    try {
+      const { data, error } = await supabase
+        .from('community_chat_mentions')
+        .select('id')
+        .eq('mentioned_user_id', userId)
+        .eq('is_read', false);
+
+      if (error) throw error;
+      return data?.length || 0;
+    } catch (err) {
+      console.error('Error fetching unread mention count:', err);
+      return 0;
+    }
+  }
+
+  /**
+   * Mark mentions as read for a community
+   */
+  static async markMentionsAsRead(userId: string, communityId: string): Promise<void> {
+    try {
+      const { error } = await supabase
+        .from('community_chat_mentions')
+        .update({ is_read: true })
+        .eq('mentioned_user_id', userId)
+        .eq('community_id', communityId);
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('Error marking mentions as read:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Subscribe to new messages in a community
+   */
+  static subscribeToMessages(
+    communityId: string,
+    onNewMessage: (message: CommunityMessage) => void,
+    onDeletedMessage?: (messageId: string) => void
+  ) {
+    const channel = supabase
+      .channel(`community_chat_${communityId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'community_chat_messages',
+          filter: `community_id=eq.${communityId}`
+        },
+        async (payload) => {
+          try {
+            // Get user details for the new message
+            const { data: userData, error: userError } = await supabase
+              .from('users')
+              .select('name, avatar_url')
+              .eq('id', payload.new.user_id)
+              .single();
+
+            if (userError) {
+              console.error('Error fetching user data for new message:', userError);
+              return;
+            }
+
+            // Get parent message if this is a reply
+            let parentMessage = undefined;
+            if (payload.new.parent_message_id) {
+              const { data: parentData, error: parentError } = await supabase
+                .from('community_chat_messages')
+                .select('id, content, user_id, user_name, media_url, media_type')
+                .eq('id', payload.new.parent_message_id)
+                .single();
+
+              if (!parentError && parentData) {
+                parentMessage = {
+                  id: parentData.id,
+                  content: parentData.content,
+                  userId: parentData.user_id,
+                  userName: parentData.user_name || 'Unknown User',
+                  isVerification: false,
+                  mediaUrl: parentData.media_url,
+                  mediaType: parentData.media_type
+                };
+              }
+            }
+
+            const message: CommunityMessage = {
+              id: payload.new.id,
+              communityId: payload.new.community_id,
+              userId: payload.new.user_id,
+              content: payload.new.content,
+              mediaUrl: payload.new.media_url,
+              mediaType: payload.new.media_type,
+              parentMessageId: payload.new.parent_message_id,
+              parentMessage,
+              replyCount: payload.new.reply_count || 0,
+              createdAt: new Date(payload.new.created_at),
+              updatedAt: new Date(payload.new.updated_at),
+              userName: userData.name || 'Unknown User',
+              userAvatarUrl: userData.avatar_url
+            };
+
+            onNewMessage(message);
+          } catch (err) {
+            console.error('Error processing real-time message:', err);
           }
         }
-        
-        // Exponential backoff
-        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-    
-    // Track failed operation
-    CommunityAnalytics.trackPerformance(
-      operation,
-      startTime,
-      false,
-      lastError?.message,
-      user.id,
-      params.community_id
-    );
-    
-    // Track failed operation
-    CommunityAnalytics.trackPerformance(
-      operation,
-      startTime,
-      false,
-      lastError?.message,
-      user.id,
-      params.community_id
-    );
-    
-    return { 
-      success: false, 
-      error: lastError?.message || 'Operation failed after retries' 
-    };
-  }, [user]);
-  
-  // Verify community membership with caching
-  const verifyCommunityMembership = useCallback(async (
-    communityId: string
-  ): Promise<CommunityOperationResult<boolean>> => {
-    const cacheKey = `membership_${user?.id}_${communityId}`;
-    const cached = CommunityCache.get<boolean>(cacheKey);
-    
-    if (cached !== null) {
-      return { success: true, data: cached };
-    }
-    
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ is_member: boolean }>(
-        'verify_membership',
-        { community_id: communityId }
-      );
-      
-      if (result.success && result.data) {
-        const isMember = result.data.is_member;
-        CommunityCache.set(cacheKey, isMember);
-        return { success: true, data: isMember };
-      }
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id, callEdgeFunction]);
-  
-  // Get community members with caching
-  const getCommunityMembers = useCallback(async (
-    communityId: string
-  ): Promise<CommunityOperationResult<CommunityMemberData[]>> => {
-    const cacheKey = `members_${communityId}`;
-    const cached = CommunityCache.get<CommunityMemberData[]>(cacheKey);
-    
-    if (cached !== null) {
-      CommunityAnalytics.trackCache(cacheKey, true);
-      return { success: true, data: cached };
-    }
-    
-    CommunityAnalytics.trackCache(cacheKey, false);
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ members: CommunityMemberData[] }>(
-        'get_members',
-        { community_id: communityId }
-      );
-      
-      if (result.success && result.data) {
-        const members = result.data.members || [];
-        CommunityCache.set(cacheKey, members);
-        return { success: true, data: members };
-      }
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [callEdgeFunction]);
-  
-  // Get message reactions
-  const getMessageReactions = useCallback(async (
-    messageId: string
-  ): Promise<CommunityOperationResult<MessageReactionData[]>> => {
-    const cacheKey = `reactions_${messageId}`;
-    const cached = CommunityCache.get<MessageReactionData[]>(cacheKey);
-    
-    if (cached !== null) {
-      CommunityAnalytics.trackCache(cacheKey, true);
-      return { success: true, data: cached };
-    }
-    
-    CommunityAnalytics.trackCache(cacheKey, false);
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ reactions: MessageReactionData[] }>(
-        'get_message_reactions',
-        { message_id: messageId }
-      );
-      
-      if (result.success && result.data) {
-        const reactions = result.data.reactions || [];
-        CommunityCache.set(cacheKey, reactions, 2 * 60 * 1000); // 2 minute cache for reactions
-        return { success: true, data: reactions };
-      }
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [callEdgeFunction]);
-  
-  // Toggle message reaction
-  const toggleMessageReaction = useCallback(async (
-    messageId: string
-  ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ reaction_added: boolean }>(
-        'toggle_reaction',
       )
-    }
-    error,
-    verifyCommunityMembership,
-    getCommunityMembers,
-    getMessageReactions,
-    toggleMessageReaction,
-    clearCache
-  };
-  )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'community_chat_messages',
+          filter: `community_id=eq.${communityId}`
+        },
+        (payload) => {
+          if (onDeletedMessage) {
+            onDeletedMessage(payload.old.id);
+          }
+        }
+      )
+      .subscribe();
+
+    return {
+      unsubscribe: () => {
+        channel.unsubscribe();
+      }
+    };
+  }
 }
