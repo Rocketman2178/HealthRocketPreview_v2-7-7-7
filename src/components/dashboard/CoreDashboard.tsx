@@ -13,15 +13,12 @@ import { QuestCard } from "./quest/QuestCard";
 import { ChallengeGrid } from "./challenge/ChallengeGrid";
 import { ContestsGrid } from "./contests/ContestsGrid";
 import { DailyBoosts } from "./boosts/DailyBoosts";
-import { CommunityChat } from "../community/CommunityChat";
-import { CommunityChatService } from "../../lib/chat/CommunityChatService";
 import { useSupabase } from "../../contexts/SupabaseContext";
 import { useDashboardData } from "../../hooks/useDashboardData";
 import { usePlayerStats } from "../../hooks/usePlayerStats";
 import { FPCongrats } from "../ui/fp-congrats";
 import { useBoostState } from "../../hooks/useBoostState";
 import { SubscriptionNotification } from "../subscription/SubscriptionNotification";
-import { useCommunityChat } from "../../hooks/useCommunityChat";
 
 export function CoreDashboard() {
   const [fpEarned, setFpEarned] = useState<number | null>(null);
@@ -30,7 +27,6 @@ export function CoreDashboard() {
   const [showInactiveAlert, setShowInactiveAlert] = useState(false);
   const { user } = useSupabase();
   const location = useLocation();
-  const { unreadMentions } = useCommunityChat();
   const {
     data,
     loading: dashboardLoading,
@@ -286,8 +282,6 @@ export function CoreDashboard() {
 
             <TabNav
               activeTab={activeTab}
-              unreadMentions={unreadMentions}
-              unreadMentions={unreadMentions}
               onTabChange={(tab) => {
                 setActiveTab(tab);
                 // Scroll to appropriate section
@@ -299,11 +293,6 @@ export function CoreDashboard() {
                     scrollToSection("challenges");
                   } else if (tab === "boosts") {
                     scrollToSection("boosts");
-                  } else if (tab === "community") {
-                    scrollToSection("community");
-                  } else if (tab === "community") {
-                    scrollToSection("community");
-                  }
                 }, 100);
               }}
             />
@@ -335,17 +324,6 @@ export function CoreDashboard() {
               </>
             )}
 
-            {activeTab === "community" && (
-              <div id="community" className="space-y-4 scroll-mt-20">
-                <h2 className="text-xl font-bold text-white">Community Chat</h2>
-                <CommunityChat 
-                  onError={(error) => {
-                    console.error('Community chat error:', error);
-                    // Could show a toast notification here
-                  }} 
-                />
-              </div>
-            )}
 
           </>
         ) : activeTab === "contests" ? (

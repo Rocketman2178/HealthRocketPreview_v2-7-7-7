@@ -1,14 +1,12 @@
 import React from 'react';
-import { Trophy, Target, Zap, MessageCircle } from 'lucide-react';
+import { Trophy, Target, Zap } from 'lucide-react';
 
 interface TabNavProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
-  unreadMentions?: number;
-}
 
-export function TabNav({ activeTab, onTabChange, unreadMentions = 0 }: TabNavProps) {
-  const tabs = [
+export function TabNav({ activeTab, onTabChange }: TabNavProps) {
+export function TabNav({ activeTab, onTabChange }: TabNavProps) {
     {
       id: 'standings',
       label: 'Player Standings',
@@ -16,20 +14,6 @@ export function TabNav({ activeTab, onTabChange, unreadMentions = 0 }: TabNavPro
     },
     {
       id: 'boosts',
-      label: 'Daily Boosts',
-      icon: Zap
-    },
-    {
-      id: 'challenges',
-      label: 'Challenges & Quests',
-      icon: Target
-    },
-    {
-      id: 'community',
-      label: 'Community Chat',
-      icon: MessageCircle,
-      hasNotification: unreadMentions > 0,
-      notificationCount: unreadMentions
     }
   ];
 

@@ -1,5 +1,3 @@
-import { CommunityAnalytics } from '../monitoring/CommunityAnalytics';
-
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
@@ -29,17 +27,14 @@ export class CommunityCache {
     const entry = this.cache.get(key);
     
     if (!entry) {
-      CommunityAnalytics.trackCache(key, false);
       return null;
     }
 
     if (Date.now() > entry.expiry) {
       this.cache.delete(key);
-      CommunityAnalytics.trackCache(key, false);
       return null;
     }
 
-    CommunityAnalytics.trackCache(key, true);
     return entry.data;
   }
 
