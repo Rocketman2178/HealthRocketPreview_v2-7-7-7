@@ -57,16 +57,6 @@ export function useCommunityOperations() {
             'Authorization': `Bearer ${session.access_token}`,
             'Content-Type': 'application/json',
           },
-  const handleEmojiClick = (emojiData: any) => {
-    setNewMessage(prev => prev + emojiData.emoji);
-    setShowEmojiPicker(false);
-  };
-
-  const handleMentionDetection = (content: string) => {
-    // Simple @ mention detection - could be enhanced later
-    const mentionRegex = /@(\w+)/g;
-    return content.replace(mentionRegex, '<span class="text-orange-500 font-bold">@$1</span>');
-  };
           // Add timeout
           signal: AbortSignal.timeout(10000)
         };
@@ -81,7 +71,7 @@ export function useCommunityOperations() {
           const errorText = await response.text();
           throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
-    <Card className="flex flex-col h-[500px]">
+        
         const data = await response.json();
         
         if (!data.success) {
@@ -140,28 +130,12 @@ export function useCommunityOperations() {
       user.id,
       params.community_id
     );
-              const isReply = !!message.parentMessageId;
-              const parentMessage = isReply ? messages.find(m => m.id === message.parentMessageId) : null;
     
     // Track failed operation
     CommunityAnalytics.trackPerformance(
       operation,
       startTime,
       false,
-                  {/* Show parent message if this is a reply */}
-                  {isReply && parentMessage && (
-                    <div className={`mb-2 ml-4 ${isMyMessage ? 'mr-8' : 'ml-12'}`}>
-                      <div className="bg-gray-600/30 border-l-2 border-orange-500/50 pl-3 py-2 rounded-r-lg">
-                        <div className="text-xs text-orange-500 font-medium mb-1">
-                          Replying to {parentMessage.userName}
-                        </div>
-                        <div className="text-xs text-gray-400 truncate">
-                          {parentMessage.content.substring(0, 100)}...
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
       lastError?.message,
       user.id,
       params.community_id
@@ -197,16 +171,10 @@ export function useCommunityOperations() {
         const isMember = result.data.is_member;
         CommunityCache.set(cacheKey, isMember);
         return { success: true, data: isMember };
-                          <div 
-                            className="text-sm"
-                            dangerouslySetInnerHTML={{
-                              __html: handleMentionDetection(message.content)
-                            }}
-                          />
+      }
       
       return result;
     } catch (err) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
       const error = err as CommunityOperationError;
       setError(error);
       return { success: false, error: error.message };
@@ -233,7 +201,7 @@ export function useCommunityOperations() {
     
     try {
       const result = await callEdgeFunction<{ members: CommunityMemberData[] }>(
-                            <div className="flex items-center gap-2">
+        'get_members',
         { community_id: communityId }
       );
       
@@ -249,12 +217,12 @@ export function useCommunityOperations() {
       setError(error);
       return { success: false, error: error.message };
     } finally {
-                                      ? 'text-orange-500 hover:text-orange-400' 
-                                      : 'text-gray-400 hover:text-orange-500'
+      setLoading(false);
+    }
   }, [callEdgeFunction]);
   
   // Get message reactions
-                                  <Zap size={14} fill={hasReacted ? 'currentColor' : 'none'} />
+  const getMessageReactions = useCallback(async (
     messageId: string
   ): Promise<CommunityOperationResult<MessageReactionData[]>> => {
     const cacheKey = `reactions_${messageId}`;
@@ -274,14 +242,14 @@ export function useCommunityOperations() {
         'get_message_reactions',
         { message_id: messageId }
       );
-                              <Zap size={12} className="text-orange-500" />
+      
       if (result.success && result.data) {
         const reactions = result.data.reactions || [];
         CommunityCache.set(cacheKey, reactions, 2 * 60 * 1000); // 2 minute cache for reactions
         return { success: true, data: reactions };
       }
-      const sentMessage = await CommunityChatService.sendMessage(
       
+      return result;
     } catch (err) {
       const error = err as CommunityOperationError;
       setError(error);
@@ -289,49 +257,16 @@ export function useCommunityOperations() {
     } finally {
       setLoading(false);
     }
-      // Add message immediately to UI for instant feedback
   }, [callEdgeFunction]);
-      if (sentMessage) {
   
-        setMessages(prev => [...prev, sentMessage]);
-        {/* Emoji Picker */}
-        {showEmojiPicker && (
-          <div ref={emojiPickerRef} className="absolute bottom-full mb-2 right-4 z-50">
-            <EmojiPicker
-              onEmojiClick={handleEmojiClick}
-              theme="dark"
-              width={300}
-              height={400}
-            />
-          </div>
-        )}
-        
   // Toggle message reaction
-          {/* Emoji button */}
-          <button
-            type="button"
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
-            title="Add emoji"
-          >
-            <Smile size={20} />
-          </button>
-          
-        // Scroll to bottom immediately
   const toggleMessageReaction = useCallback(async (
-        setTimeout(() => {
     messageId: string
-          if (messagesEndRef.current) {
   ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
-            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     setLoading(true);
-          }
     setError(null);
-        }, 50);
     
-      }
     try {
-
       const result = await callEdgeFunction<{ reaction_added: boolean }>(
         'toggle_reaction',
     error,
