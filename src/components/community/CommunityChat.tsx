@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { useSupabase } from '../contexts/SupabaseContext';
+    const startTime = Date.now();
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
 import { CommunityCache } from '../lib/cache/CommunityCache';
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
@@ -13,7 +14,7 @@ import type {
 
 
 export function useCommunityOperations() {
-  const { user, supabase } = useSupabase();
+  const { user } = useSupabase();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<CommunityOperationError | null>(null);
   
@@ -144,7 +145,7 @@ export function useCommunityOperations() {
       success: false, 
       error: lastError?.message || 'Operation failed after retries' 
     };
-  }, [user, supabase]);
+  }, [user]);
   
   // Verify community membership with caching
   const verifyCommunityMembership = useCallback(async (
@@ -267,35 +268,7 @@ export function useCommunityOperations() {
     
     try {
       const result = await callEdgeFunction<{ reaction_added: boolean }>(
-        'toggle_message_reaction',
-        { messageId },
-        'POST'
-      );
-      
-      // Invalidate reactions cache for this message
-      CommunityCache.invalidate(`reactions_${messageId}`);
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [callEdgeFunction]);
-  
-  // Clear cache for a specific key or all cache
-  const clearCache = useCallback((key?: string) => {
-    if (key) {
-      CommunityCache.invalidate(key);
-    } else {
-      CommunityCache.clear();
-    }
-  }, []);
-  
-  return {
-    loading,
+        'toggle_reaction',
     error,
     verifyCommunityMembership,
     getCommunityMembers,
