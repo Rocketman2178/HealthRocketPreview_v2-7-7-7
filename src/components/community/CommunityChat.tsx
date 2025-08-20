@@ -55,33 +55,39 @@ export function CommunityChat({ onError }: CommunityChatProps) {
         setLoading(true);
         setError(null);
 
-        // Use the edge function to get messages
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
-          throw new Error('No active session');
+        // Use the RPC function instead of edge function
+        const { data, error } = await supabase.rpc('get_community_chat_messages', {
+          p_community_id: primaryCommunity.id,
+          p_limit: 50,
+          p_offset: 0
+        });
+
+        if (error) throw error;
+
+        if (!data || !Array.isArray(data)) {
+          setMessages([]);
+          return;
         }
 
-        const response = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat?action=get_messages&community_id=${primaryCommunity.id}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${session.access_token}`,
-              'Content-Type': 'application/json',
-            }
-          }
-        );
+        // Transform and sort messages
+        const transformedMessages = data
+          .map(msg => ({
+            id: msg.id,
+            community_id: msg.community_id,
+            user_id: msg.user_id,
+            content: msg.content,
+            media_url: msg.media_url,
+            media_type: msg.media_type,
+            parent_message_id: msg.parent_message_id,
+            reply_count: msg.reply_count || 0,
+            created_at: msg.created_at,
+            updated_at: msg.updated_at,
+            user_name: msg.user_name || 'Unknown User',
+            user_avatar_url: msg.user_avatar_url
+          }))
+          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-        
-        if (!data.success) {
-          throw new Error(data.error || 'Failed to load messages');
-        }
-
-        setMessages(data.messages || []);
+        setMessages(transformedMessages);
 
       } catch (err) {
         console.error('Error loading community chat:', err);
@@ -105,42 +111,53 @@ export function CommunityChat({ onError }: CommunityChatProps) {
       setSending(true);
       setError(null);
 
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('No active session');
-      }
+      // Get user details first
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('name, avatar_url')
+        .eq('id', user.id)
+        .single();
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'send_message',
-            communityId: primaryCommunity.id,
-            content: newMessage.trim(),
-            parentMessageId: replyingTo?.id
-          })
+      if (userError) throw userError;
+
+      // Insert the message directly
+      const { data: insertedMessage, error: insertError } = await supabase
+        .from('community_chat_messages')
+        .insert({
+          user_id: user.id,
+          community_id: primaryCommunity.id,
+          content: newMessage.trim(),
+          parent_message_id: replyingTo?.id,
+          user_name: userData.name || 'Unknown User'
+        })
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      // Add message to local state immediately for better UX
+      const messageToAdd: CommunityMessage = {
+        id: insertedMessage.id,
+        community_id: insertedMessage.community_id,
+        user_id: insertedMessage.user_id,
+        content: insertedMessage.content,
+        media_url: insertedMessage.media_url,
+        media_type: insertedMessage.media_type,
+        parent_message_id: insertedMessage.parent_message_id,
+        reply_count: 0,
+        created_at: insertedMessage.created_at,
+        updated_at: insertedMessage.updated_at,
+        user_name: userData.name || 'Unknown User',
+        user_avatar_url: userData.avatar_url
+      };
+
+      setMessages(prev => {
+        // Prevent duplicates
+        if (prev.some(msg => msg.id === messageToAdd.id)) {
+          return prev;
         }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to send message');
-      }
-
-      // Add message to local state
-      if (data.message) {
-        setMessages(prev => [...prev, data.message]);
-      }
+        return [...prev, messageToAdd];
+      });
 
       // Clear form
       setNewMessage('');
@@ -158,31 +175,93 @@ export function CommunityChat({ onError }: CommunityChatProps) {
     if (!user) return;
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
+      const { error } = await supabase
+        .from('community_chat_messages')
+        .delete()
+        .eq('id', messageId)
+        .eq('user_id', user.id);
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            action: 'delete_message',
-            messageId
-          })
-        }
-      );
+      if (error) throw error;
 
-      if (response.ok) {
-        setMessages(prev => prev.filter(msg => msg.id !== messageId));
-      }
+      setMessages(prev => prev.filter(msg => msg.id !== messageId));
     } catch (err) {
       console.error('Error deleting message:', err);
     }
   };
+
+  // Subscribe to new messages
+  useEffect(() => {
+    if (!primaryCommunity?.id || !user) return;
+
+    const channel = supabase
+      .channel(`community_chat_${primaryCommunity.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'community_chat_messages',
+          filter: `community_id=eq.${primaryCommunity.id}`
+        },
+        async (payload) => {
+          try {
+            // Get user details for the new message
+            const { data: userData, error: userError } = await supabase
+              .from('users')
+              .select('name, avatar_url')
+              .eq('id', payload.new.user_id)
+              .single();
+
+            if (userError) {
+              console.error('Error fetching user data for new message:', userError);
+              return;
+            }
+
+            const message: CommunityMessage = {
+              id: payload.new.id,
+              community_id: payload.new.community_id,
+              user_id: payload.new.user_id,
+              content: payload.new.content,
+              media_url: payload.new.media_url,
+              media_type: payload.new.media_type,
+              parent_message_id: payload.new.parent_message_id,
+              reply_count: payload.new.reply_count || 0,
+              created_at: payload.new.created_at,
+              updated_at: payload.new.updated_at,
+              user_name: userData.name || 'Unknown User',
+              user_avatar_url: userData.avatar_url
+            };
+
+            setMessages(prev => {
+              // Prevent duplicates
+              if (prev.some(msg => msg.id === message.id)) {
+                return prev;
+              }
+              return [...prev, message];
+            });
+          } catch (err) {
+            console.error('Error processing real-time message:', err);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'community_chat_messages',
+          filter: `community_id=eq.${primaryCommunity.id}`
+        },
+        (payload) => {
+          setMessages(prev => prev.filter(msg => msg.id !== payload.old.id));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [primaryCommunity?.id, user]);
 
   // Show loading state
   if (loading) {
