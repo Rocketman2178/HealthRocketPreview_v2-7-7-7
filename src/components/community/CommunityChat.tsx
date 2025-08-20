@@ -1,282 +1,231 @@
-import { useState, useCallback, useRef } from 'react';
-import { useSupabase } from '../contexts/SupabaseContext';
-    const startTime = Date.now();
-import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
-import { CommunityCache } from '../lib/cache/CommunityCache';
-import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
-import { CommunityCache } from '../lib/cache/CommunityCache';
-import type { 
-  CommunityOperationResult, 
-  MessageReactionData, 
-  CommunityMemberData,
-  CommunityOperationError 
-} from '../types/community';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { MessageCircle, Send, Users, AlertTriangle, Loader2, User, X, Image, Smile } from 'lucide-react';
+import { useSupabase } from '../../contexts/SupabaseContext';
+import { useCommunity } from '../../hooks/useCommunity';
+import { CommunityChatService } from '../../lib/chat/CommunityChatService';
+import { Card } from '../ui/card';
+import type { CommunityMessage } from '../../lib/chat/CommunityChatService';
 
+interface CommunityChatProps {
+  onError?: (error: Error) => void;
+}
 
-export function useCommunityOperations() {
+export function CommunityChat({ onError }: CommunityChatProps) {
   const { user } = useSupabase();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<CommunityOperationError | null>(null);
-  
-  // Generic Edge Function caller with retry logic
-  const callEdgeFunction = useCallback(async <T>(
-    operation: string,
-    params: Record<string, any> = {},
-    method: 'GET' | 'POST' = 'GET',
-    maxRetries: number = 3
-  ): Promise<CommunityOperationResult<T>> => {
-    if (!user) {
-      return { success: false, error: 'User not authenticated' };
+  const { primaryCommunity } = useCommunity(user?.id);
+  const [messages, setMessages] = useState<CommunityMessage[]>([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
+
+  // Load messages when component mounts or community changes
+  useEffect(() => {
+    if (!primaryCommunity?.id || !user) {
+      setMessages([]);
+      setLoading(false);
+      return;
     }
-    
-    const startTime = Date.now();
-    let lastError: Error | null = null;
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+
+    const loadMessages = async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
-          throw new Error('No active session');
-        }
+        setLoading(true);
+        setError(null);
         
-        // Build URL with query params for GET requests
-        const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations`);
-        url.searchParams.set('operation', operation);
-        
-        if (method === 'GET') {
-          Object.entries(params).forEach(([key, value]) => {
-            if (value !== undefined && value !== null) {
-              url.searchParams.set(key, String(value));
-            }
-          });
-        }
-        
-        const requestOptions: RequestInit = {
-          method,
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          // Add timeout
-          signal: AbortSignal.timeout(10000)
-        };
-        
-        if (method === 'POST') {
-          requestOptions.body = JSON.stringify(params);
-        }
-        
-        const response = await fetch(url.toString(), requestOptions);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`HTTP ${response.status}: ${errorText}`);
-        }
-        
-        const data = await response.json();
-        
-        if (!data.success) {
-          const error = new Error(data.error || 'Operation failed') as CommunityOperationError;
-          error.retryable = response.status >= 500; // Server errors are retryable
-          throw error;
-        }
-        
-        // Track successful operation
-        CommunityAnalytics.trackPerformance(
-          operation,
-          startTime,
-          true,
-          undefined,
-          user.id,
-          params.community_id
-        );
-        
-        // Track successful operation
-        CommunityAnalytics.trackPerformance(
-          operation,
-          startTime,
-          true,
-          undefined,
-          user.id,
-          params.community_id
-        );
-        
-        return { success: true, data: data };
+        const fetchedMessages = await CommunityChatService.getMessages(primaryCommunity.id);
+        setMessages(fetchedMessages);
       } catch (err) {
-        lastError = err as Error;
-        
-        // Don't retry on client errors (4xx) or authentication errors
-        if (err instanceof Error) {
-          const isRetryable = (err as CommunityOperationError).retryable !== false &&
-                             !err.message.includes('authentication') &&
-                             !err.message.includes('not a member');
-          
-          if (!isRetryable || attempt === maxRetries - 1) {
-            break;
-          }
+        console.error('Error loading community messages:', err);
+        const errorMessage = err instanceof Error ? err.message : 'Failed to load messages';
+        setError(errorMessage);
+        if (onError) {
+          onError(err instanceof Error ? err : new Error(errorMessage));
         }
-        
-        // Exponential backoff
-        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-        await new Promise(resolve => setTimeout(resolve, delay));
+      } finally {
+        setLoading(false);
       }
-    }
-    
-    // Track failed operation
-    CommunityAnalytics.trackPerformance(
-      operation,
-      startTime,
-      false,
-      lastError?.message,
-      user.id,
-      params.community_id
-    );
-    
-    // Track failed operation
-    CommunityAnalytics.trackPerformance(
-      operation,
-      startTime,
-      false,
-      lastError?.message,
-      user.id,
-      params.community_id
-    );
-    
-    return { 
-      success: false, 
-      error: lastError?.message || 'Operation failed after retries' 
     };
-  }, [user]);
-  
-  // Verify community membership with caching
-  const verifyCommunityMembership = useCallback(async (
-    communityId: string
-  ): Promise<CommunityOperationResult<boolean>> => {
-    const cacheKey = `membership_${user?.id}_${communityId}`;
-    const cached = CommunityCache.get<boolean>(cacheKey);
-    
-    if (cached !== null) {
-      return { success: true, data: cached };
+
+    loadMessages();
+  }, [primaryCommunity?.id, user, onError]);
+
+  // Subscribe to new messages
+  useEffect(() => {
+    if (!primaryCommunity?.id) return;
+
+    // Clean up previous subscription
+    if (subscriptionRef.current) {
+      subscriptionRef.current.unsubscribe();
     }
-    
-    setLoading(true);
-    setError(null);
-    
+
     try {
-      const result = await callEdgeFunction<{ is_member: boolean }>(
-        'verify_membership',
-        { community_id: communityId }
+      subscriptionRef.current = CommunityChatService.subscribeToMessages(
+        primaryCommunity.id,
+        (newMessage) => {
+          setMessages(prev => [...prev, newMessage]);
+        },
+        (deletedMessageId) => {
+          setMessages(prev => prev.filter(msg => msg.id !== deletedMessageId));
+        }
       );
-      
-      if (result.success && result.data) {
-        const isMember = result.data.is_member;
-        CommunityCache.set(cacheKey, isMember);
-        return { success: true, data: isMember };
-      }
-      
-      return result;
     } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
+      console.error('Error setting up message subscription:', err);
     }
-  }, [user?.id, callEdgeFunction]);
-  
-  // Get community members with caching
-  const getCommunityMembers = useCallback(async (
-    communityId: string
-  ): Promise<CommunityOperationResult<CommunityMemberData[]>> => {
-    const cacheKey = `members_${communityId}`;
-    const cached = CommunityCache.get<CommunityMemberData[]>(cacheKey);
-    
-    if (cached !== null) {
-      CommunityAnalytics.trackCache(cacheKey, true);
-      return { success: true, data: cached };
+
+    return () => {
+      if (subscriptionRef.current) {
+        subscriptionRef.current.unsubscribe();
+      }
+    };
+  }, [primaryCommunity?.id]);
+
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-    
-    CommunityAnalytics.trackCache(cacheKey, false);
-    setLoading(true);
-    setError(null);
-    
+  }, [messages]);
+
+  const handleSendMessage = useCallback(async () => {
+    if (!newMessage.trim() || !primaryCommunity?.id || !user || sending) return;
+
     try {
-      const result = await callEdgeFunction<{ members: CommunityMemberData[] }>(
-        'get_members',
-        { community_id: communityId }
+      setSending(true);
+      setError(null);
+
+      await CommunityChatService.sendMessage(
+        user.id,
+        primaryCommunity.id,
+        newMessage.trim()
       );
-      
-      if (result.success && result.data) {
-        const members = result.data.members || [];
-        CommunityCache.set(cacheKey, members);
-        return { success: true, data: members };
-      }
-      
-      return result;
+
+      setNewMessage('');
     } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [callEdgeFunction]);
-  
-  // Get message reactions
-  const getMessageReactions = useCallback(async (
-    messageId: string
-  ): Promise<CommunityOperationResult<MessageReactionData[]>> => {
-    const cacheKey = `reactions_${messageId}`;
-    const cached = CommunityCache.get<MessageReactionData[]>(cacheKey);
-    
-    if (cached !== null) {
-      CommunityAnalytics.trackCache(cacheKey, true);
-      return { success: true, data: cached };
-    }
-    
-    CommunityAnalytics.trackCache(cacheKey, false);
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ reactions: MessageReactionData[] }>(
-        'get_message_reactions',
-        { message_id: messageId }
-      );
-      
-      if (result.success && result.data) {
-        const reactions = result.data.reactions || [];
-        CommunityCache.set(cacheKey, reactions, 2 * 60 * 1000); // 2 minute cache for reactions
-        return { success: true, data: reactions };
+      console.error('Error sending message:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
+      setError(errorMessage);
+      if (onError) {
+        onError(err instanceof Error ? err : new Error(errorMessage));
       }
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
     } finally {
-      setLoading(false);
+      setSending(false);
     }
-  }, [callEdgeFunction]);
-  
-  // Toggle message reaction
-  const toggleMessageReaction = useCallback(async (
-    messageId: string
-  ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const result = await callEdgeFunction<{ reaction_added: boolean }>(
-        'toggle_reaction',
-      )
+  }, [newMessage, primaryCommunity?.id, user, sending, onError]);
+
+  const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
     }
-    error,
-    verifyCommunityMembership,
-    getCommunityMembers,
-    getMessageReactions,
-    toggleMessageReaction,
-    clearCache
-  };
-  )
+  }, [handleSendMessage]);
+
+  if (!primaryCommunity) {
+    return (
+      <Card className="p-6">
+        <div className="text-center">
+          <Users className="mx-auto mb-4 text-gray-400" size={48} />
+          <h3 className="text-lg font-semibold text-white mb-2">No Community Selected</h3>
+          <p className="text-gray-400">Join a community to start chatting with other members.</p>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="flex flex-col h-96">
+      {/* Header */}
+      <div className="flex items-center justify-between p-4 border-b border-gray-700">
+        <div className="flex items-center gap-2">
+          <MessageCircle className="text-orange-500" size={20} />
+          <h3 className="text-lg font-semibold text-white">{primaryCommunity.name}</h3>
+        </div>
+        <div className="text-sm text-gray-400">
+          {messages.length} messages
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {loading ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader2 className="animate-spin text-orange-500" size={24} />
+          </div>
+        ) : error ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <AlertTriangle className="mx-auto mb-2 text-red-400" size={24} />
+              <p className="text-red-400 text-sm">{error}</p>
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <MessageCircle className="mx-auto mb-2 text-gray-400" size={24} />
+              <p className="text-gray-400">No messages yet</p>
+              <p className="text-gray-500 text-sm">Be the first to start the conversation!</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[70%] rounded-lg p-3 ${
+                    message.userId === user?.id
+                      ? 'bg-orange-500 text-white'
+                      : 'bg-gray-700 text-gray-100'
+                  }`}
+                >
+                  {message.userId !== user?.id && (
+                    <div className="text-xs text-orange-400 mb-1 font-medium">
+                      {message.userName}
+                    </div>
+                  )}
+                  <div className="text-sm">{message.content}</div>
+                  <div className="text-xs opacity-75 mt-1">
+                    {new Date(message.createdAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div ref={messagesEndRef} />
+          </>
+        )}
+      </div>
+
+      {/* Input */}
+      <div className="p-4 border-t border-gray-700">
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={newMessage}
+            onChange={(e) => setNewMessage(e.target.value)}
+            onKeyPress={handleKeyPress}
+            placeholder="Type a message..."
+            disabled={sending}
+            className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-50"
+          />
+          <button
+            onClick={handleSendMessage}
+            disabled={!newMessage.trim() || sending}
+            className="bg-orange-500 text-white rounded-lg p-2 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {sending ? (
+              <Loader2 className="animate-spin" size={20} />
+            ) : (
+              <Send size={20} />
+            )}
+          </button>
+        </div>
+      </div>
+    </Card>
+  );
 }
