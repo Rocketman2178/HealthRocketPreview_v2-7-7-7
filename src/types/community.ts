@@ -269,8 +269,6 @@ export function useCommunityOperations() {
     try {
       const result = await callEdgeFunction<{ reaction_added: boolean }>(
         'toggle_reaction',
-      )
-    }
     error,
     verifyCommunityMembership,
     getCommunityMembers,
@@ -278,5 +276,4 @@ export function useCommunityOperations() {
     toggleMessageReaction,
     clearCache
   };
-  )
 }

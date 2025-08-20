@@ -1,583 +1,280 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Send, User, Zap, Reply, Trash2, Smile, X } from 'lucide-react';
-import EmojiPicker from 'emoji-picker-react';
-import { useSupabase } from '../../contexts/SupabaseContext';
-import { useCommunity } from '../../hooks/useCommunity';
-import { CommunityChatService } from '../../lib/chat/CommunityChatService';
-import type { CommunityMessage } from '../../types/community';
+import { useState, useCallback, useRef } from 'react';
+import { useSupabase } from '../contexts/SupabaseContext';
+    const startTime = Date.now();
+import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
+import { CommunityCache } from '../lib/cache/CommunityCache';
+import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
+import { CommunityCache } from '../lib/cache/CommunityCache';
+import type { 
+  CommunityOperationResult, 
+  MessageReactionData, 
+  CommunityMemberData,
+  CommunityOperationError 
+} from '../types/community';
 
-interface CommunityMember {
-  id: string;
-  name: string;
-  avatarUrl?: string;
-}
 
-interface CommunityChatProps {
-  onError?: (error: Error) => void;
-}
-
-export function CommunityChat({ onError }: CommunityChatProps) {
+export function useCommunityOperations() {
   const { user } = useSupabase();
-  const { primaryCommunity } = useCommunity(user?.id);
-  const [messages, setMessages] = useState<CommunityMessage[]>([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [members, setMembers] = useState<CommunityMember[]>([]);
-  const [replyingTo, setReplyingTo] = useState<CommunityMessage | null>(null);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState('');
-  const [showMentions, setShowMentions] = useState(false);
-  const [mentionStartIndex, setMentionStartIndex] = useState(-1);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<CommunityOperationError | null>(null);
   
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const emojiPickerRef = useRef<HTMLDivElement>(null);
-  const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
-
-  // Auto-scroll to bottom
-  const scrollToBottom = (smooth = true) => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ 
-        behavior: smooth ? 'smooth' : 'auto',
-        block: 'end'
-      });
+  // Generic Edge Function caller with retry logic
+  const callEdgeFunction = useCallback(async <T>(
+    operation: string,
+    params: Record<string, any> = {},
+    method: 'GET' | 'POST' = 'GET',
+    maxRetries: number = 3
+  ): Promise<CommunityOperationResult<T>> => {
+    if (!user) {
+      return { success: false, error: 'User not authenticated' };
     }
-  };
-
-  // Load initial messages
-  useEffect(() => {
-    if (!primaryCommunity?.id || !user) return;
-
-    const loadMessages = async () => {
+    
+    const startTime = Date.now();
+    let lastError: Error | null = null;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        setLoading(true);
-        setError(null);
-
-        // Load messages and members in parallel
-        const [messagesData, membersData] = await Promise.all([
-          CommunityChatService.getMessages(primaryCommunity.id),
-          CommunityChatService.getCommunityMembers(primaryCommunity.id)
-        ]);
-
-        setMessages(messagesData);
-        setMembers(membersData);
-
-        // Scroll to bottom after messages load
-        setTimeout(() => scrollToBottom(false), 100);
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          throw new Error('No active session');
+        }
+        
+        // Build URL with query params for GET requests
+        const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations`);
+        url.searchParams.set('operation', operation);
+        
+        if (method === 'GET') {
+          Object.entries(params).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) {
+              url.searchParams.set(key, String(value));
+            }
+          });
+        }
+        
+        const requestOptions: RequestInit = {
+          method,
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          // Add timeout
+          signal: AbortSignal.timeout(10000)
+        };
+        
+        if (method === 'POST') {
+          requestOptions.body = JSON.stringify(params);
+        }
+        
+        const response = await fetch(url.toString(), requestOptions);
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (!data.success) {
+          const error = new Error(data.error || 'Operation failed') as CommunityOperationError;
+          error.retryable = response.status >= 500; // Server errors are retryable
+          throw error;
+        }
+        
+        // Track successful operation
+        CommunityAnalytics.trackPerformance(
+          operation,
+          startTime,
+          true,
+          undefined,
+          user.id,
+          params.community_id
+        );
+        
+        // Track successful operation
+        CommunityAnalytics.trackPerformance(
+          operation,
+          startTime,
+          true,
+          undefined,
+          user.id,
+          params.community_id
+        );
+        
+        return { success: true, data: data };
       } catch (err) {
-        console.error('Error loading community chat:', err);
-        setError('Failed to load messages');
-        onError?.(err instanceof Error ? err : new Error('Failed to load messages'));
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadMessages();
-  }, [primaryCommunity?.id, user, onError]);
-
-  // Set up real-time subscription
-  useEffect(() => {
-    if (!primaryCommunity?.id || !user) return;
-
-    const subscription = CommunityChatService.subscribeToMessages(
-      primaryCommunity.id,
-      (newMessage) => {
-        setMessages(prev => {
-          // Check if message already exists to prevent duplicates
-          if (prev.some(msg => msg.id === newMessage.id)) {
-            return prev;
-          }
-          const updated = [...prev, newMessage];
-          // Scroll to bottom when new message arrives
-          setTimeout(() => scrollToBottom(), 100);
-          return updated;
-        });
-      },
-      (deletedMessageId) => {
-        setMessages(prev => prev.filter(msg => msg.id !== deletedMessageId));
-      }
-    );
-
-    subscriptionRef.current = subscription;
-
-    return () => {
-      if (subscriptionRef.current) {
-        subscriptionRef.current.unsubscribe();
-        subscriptionRef.current = null;
-      }
-    };
-  }, [primaryCommunity?.id, user]);
-
-  // Handle mention detection
-  const handleMentionDetection = (value: string) => {
-    const lastAtIndex = value.lastIndexOf('@');
-    if (lastAtIndex !== -1) {
-      const textAfterAt = value.slice(lastAtIndex + 1);
-      if (!textAfterAt.includes(' ') && textAfterAt.length >= 0) {
-        setMentionQuery(textAfterAt);
-        setMentionStartIndex(lastAtIndex);
-        setShowMentions(true);
-      } else {
-        setShowMentions(false);
-      }
-    } else {
-      setShowMentions(false);
-    }
-  };
-
-  // Handle message input change
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value;
-    setNewMessage(value);
-    handleMentionDetection(value);
-  };
-
-  // Handle mention selection
-  const handleMentionSelect = (member: CommunityMember) => {
-    if (mentionStartIndex === -1) return;
-    
-    const beforeMention = newMessage.slice(0, mentionStartIndex);
-    const afterMention = newMessage.slice(mentionStartIndex + 1 + mentionQuery.length);
-    const newContent = `${beforeMention}@${member.name} ${afterMention}`;
-    
-    setNewMessage(newContent);
-    setShowMentions(false);
-    setMentionQuery('');
-    inputRef.current?.focus();
-  };
-
-  // Handle emoji selection
-  const handleEmojiClick = (emojiData: any) => {
-    setNewMessage(prev => prev + emojiData.emoji);
-    setShowEmojiPicker(false);
-    inputRef.current?.focus();
-  };
-
-  // Close emoji picker when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target as Node)) {
-        setShowEmojiPicker(false);
-      }
-    };
-
-    if (showEmojiPicker) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [showEmojiPicker]);
-
-  // Handle sending message
-  const handleSendMessage = async () => {
-    if (!newMessage.trim() || !primaryCommunity?.id || !user || sending) return;
-
-    try {
-      setSending(true);
-      setError(null);
-
-      // Optimistically add message to UI
-      const optimisticMessage: CommunityMessage = {
-        id: `temp-${Date.now()}`,
-        communityId: primaryCommunity.id,
-        userId: user.id,
-        content: newMessage.trim(),
-        parentMessageId: replyingTo?.id,
-        replyCount: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        userName: user.user_metadata?.name || user.email?.split('@')[0] || 'You',
-        userAvatarUrl: user.user_metadata?.avatar_url
-      };
-
-      setMessages(prev => [...prev, optimisticMessage]);
-      setNewMessage('');
-      setReplyingTo(null);
-
-      // Scroll to bottom immediately
-      setTimeout(() => scrollToBottom(), 50);
-
-      // Send to database
-      const sentMessage = await CommunityChatService.sendMessage(
-        user.id,
-        primaryCommunity.id,
-        newMessage.trim(),
-        undefined,
-        undefined,
-        replyingTo?.id
-      );
-
-      // Replace optimistic message with real one
-      setMessages(prev => 
-        prev.map(msg => 
-          msg.id === optimisticMessage.id ? sentMessage : msg
-        )
-      );
-
-    } catch (err) {
-      console.error('Error sending message:', err);
-      setError('Failed to send message');
-      
-      // Remove optimistic message on error
-      setMessages(prev => prev.filter(msg => msg.id !== `temp-${Date.now()}`));
-      
-      onError?.(err instanceof Error ? err : new Error('Failed to send message'));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  // Handle message deletion
-  const handleDeleteMessage = async (messageId: string) => {
-    if (!user) return;
-
-    try {
-      await CommunityChatService.deleteMessage(user.id, messageId);
-      setMessages(prev => prev.filter(msg => msg.id !== messageId));
-    } catch (err) {
-      console.error('Error deleting message:', err);
-      setError('Failed to delete message');
-    }
-  };
-
-  // Handle reaction toggle
-  const handleToggleReaction = async (messageId: string) => {
-    if (!user) return;
-
-    try {
-      const reactionAdded = await CommunityChatService.toggleReaction(user.id, messageId);
-      
-      // Update local state optimistically
-      setMessages(prev => prev.map(msg => {
-        if (msg.id === messageId) {
-          const reactions = msg.reactions || [];
-          if (reactionAdded) {
-            // Add reaction
-            return {
-              ...msg,
-              reactions: [...reactions, {
-                id: `temp-${Date.now()}`,
-                user_id: user.id,
-                user_name: user.user_metadata?.name || 'You',
-                created_at: new Date().toISOString()
-              }]
-            };
-          } else {
-            // Remove reaction
-            return {
-              ...msg,
-              reactions: reactions.filter(r => r.user_id !== user.id)
-            };
+        lastError = err as Error;
+        
+        // Don't retry on client errors (4xx) or authentication errors
+        if (err instanceof Error) {
+          const isRetryable = (err as CommunityOperationError).retryable !== false &&
+                             !err.message.includes('authentication') &&
+                             !err.message.includes('not a member');
+          
+          if (!isRetryable || attempt === maxRetries - 1) {
+            break;
           }
         }
-        return msg;
-      }));
+        
+        // Exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    // Track failed operation
+    CommunityAnalytics.trackPerformance(
+      operation,
+      startTime,
+      false,
+      lastError?.message,
+      user.id,
+      params.community_id
+    );
+    
+    // Track failed operation
+    CommunityAnalytics.trackPerformance(
+      operation,
+      startTime,
+      false,
+      lastError?.message,
+      user.id,
+      params.community_id
+    );
+    
+    return { 
+      success: false, 
+      error: lastError?.message || 'Operation failed after retries' 
+    };
+  }, [user]);
+  
+  // Verify community membership with caching
+  const verifyCommunityMembership = useCallback(async (
+    communityId: string
+  ): Promise<CommunityOperationResult<boolean>> => {
+    const cacheKey = `membership_${user?.id}_${communityId}`;
+    const cached = CommunityCache.get<boolean>(cacheKey);
+    
+    if (cached !== null) {
+      return { success: true, data: cached };
+    }
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ is_member: boolean }>(
+        'verify_membership',
+        { community_id: communityId }
+      );
+      
+      if (result.success && result.data) {
+        const isMember = result.data.is_member;
+        CommunityCache.set(cacheKey, isMember);
+        return { success: true, data: isMember };
+      }
+      
+      return result;
     } catch (err) {
-      console.error('Error toggling reaction:', err);
-      setError('Failed to update reaction');
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
     }
-  };
-
-  // Handle key press
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
+  }, [user?.id, callEdgeFunction]);
+  
+  // Get community members with caching
+  const getCommunityMembers = useCallback(async (
+    communityId: string
+  ): Promise<CommunityOperationResult<CommunityMemberData[]>> => {
+    const cacheKey = `members_${communityId}`;
+    const cached = CommunityCache.get<CommunityMemberData[]>(cacheKey);
+    
+    if (cached !== null) {
+      CommunityAnalytics.trackCache(cacheKey, true);
+      return { success: true, data: cached };
     }
-  };
-
-  // Format content with mentions
-  const formatContentWithMentions = (content: string): string => {
-    return content.replace(
-      /@([A-Za-z]+(?:\s+[A-Za-z]+)*?)(?=\s+[a-z]|\s*[!.?,:;]|\s*$)/g,
-      '<span class="text-orange-500 font-bold">@$1</span>'
-    );
-  };
-
-  // Filter members for mentions
-  const filteredMembers = members.filter(member =>
-    member.name.toLowerCase().includes(mentionQuery.toLowerCase())
-  );
-
-  if (!primaryCommunity) {
-    return (
-      <div className="bg-gray-800/50 rounded-lg p-6 text-center">
-        <div className="text-gray-400 mb-4">
-          <User size={48} className="mx-auto mb-2" />
-          <p>Join a community to start chatting</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div id="community" className="space-y-4 scroll-mt-20">
-      <div className="bg-gray-800/50 rounded-lg overflow-hidden">
-        {/* Header */}
-        <div className="p-4 border-b border-gray-700">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <User className="text-orange-500" size={20} />
-              <h3 className="text-lg font-semibold text-white">{primaryCommunity.name}</h3>
-            </div>
-            <div className="text-sm text-gray-400">
-              {members.length} {members.length === 1 ? 'member' : 'members'}
-            </div>
-          </div>
-        </div>
-
-        {/* Messages Container */}
-        <div 
-          ref={messagesContainerRef}
-          className="h-[500px] overflow-y-auto p-4 space-y-4"
-        >
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-orange-500" />
-            </div>
-          ) : error ? (
-            <div className="text-center text-red-400 py-8">
-              <p>{error}</p>
-              <button 
-                onClick={() => window.location.reload()}
-                className="mt-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600"
-              >
-                Retry
-              </button>
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="text-center text-gray-400 py-8">
-              <User size={32} className="mx-auto mb-2" />
-              <p>No messages yet</p>
-              <p className="text-sm mt-1">Be the first to start the conversation!</p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <div key={message.id} className="group">
-                {/* Reply indicator */}
-                {message.parentMessageId && (
-                  <div className="mb-2 ml-4 pl-3 border-l-2 border-gray-600">
-                    <div className="flex items-center gap-2 text-xs text-gray-400">
-                      <Reply size={12} />
-                      <span>Replying to a message</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className={`flex gap-3 ${message.userId === user?.id ? 'flex-row-reverse' : 'flex-row'}`}>
-                  {/* Avatar - only for others */}
-                  {message.userId !== user?.id && (
-                    <div className="flex-shrink-0">
-                      {message.userAvatarUrl ? (
-                        <img
-                          src={message.userAvatarUrl}
-                          alt={message.userName}
-                          className="w-8 h-8 rounded-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
-                          <User size={16} className="text-gray-400" />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Message Content */}
-                  <div className={`flex-1 max-w-[70%] ${message.userId === user?.id ? 'text-right' : 'text-left'}`}>
-                    <div
-                      className={`rounded-lg p-3 ${
-                        message.userId === user?.id
-                          ? 'bg-gray-800 border-2 border-orange-500 text-white ml-auto'
-                          : 'bg-gray-700 border-2 border-green-500 text-gray-100'
-                      }`}
-                    >
-                      {/* User name for others */}
-                      {message.userId !== user?.id && (
-                        <div className="text-xs text-green-400 font-medium mb-1">
-                          {message.userName}
-                        </div>
-                      )}
-
-                      {/* Message content with mentions */}
-                      <div 
-                        className="text-sm break-words"
-                        dangerouslySetInnerHTML={{
-                          __html: formatContentWithMentions(message.content)
-                        }}
-                      />
-
-                      {/* Message metadata and actions */}
-                      <div className="flex items-center justify-between mt-2 text-xs">
-                        <span className="text-gray-400">
-                          {message.createdAt.toLocaleTimeString('en-US', {
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
-                        </span>
-
-                        {/* Action buttons - always visible */}
-                        <div className="flex items-center gap-2">
-                          {/* Reply button */}
-                          <button
-                            onClick={() => setReplyingTo(message)}
-                            className="text-gray-400 hover:text-blue-400 transition-colors"
-                            title="Reply"
-                          >
-                            <Reply size={14} />
-                          </button>
-
-                          {/* Like button - only for others' messages */}
-                          {message.userId !== user?.id && (
-                            <button
-                              onClick={() => handleToggleReaction(message.id)}
-                              className={`transition-colors ${
-                                message.reactions?.some(r => r.user_id === user?.id)
-                                  ? 'text-orange-500'
-                                  : 'text-gray-400 hover:text-orange-400'
-                              }`}
-                              title="Like"
-                            >
-                              <Zap size={14} />
-                            </button>
-                          )}
-
-                          {/* Delete button - only for own messages */}
-                          {message.userId === user?.id && (
-                            <button
-                              onClick={() => handleDeleteMessage(message.id)}
-                              className="text-gray-400 hover:text-red-400 transition-colors"
-                              title="Delete"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )}
-
-                          {/* Reaction count */}
-                          {message.reactions && message.reactions.length > 0 && (
-                            <div className="flex items-center gap-1 text-orange-500">
-                              <Zap size={12} />
-                              <span>{message.reactions.length}</span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input Area */}
-        <div className="border-t border-gray-700 p-4 relative">
-          {/* Emoji Picker */}
-          {showEmojiPicker && (
-            <div ref={emojiPickerRef} className="absolute bottom-full mb-2 right-4 z-50">
-              <EmojiPicker
-                onEmojiClick={handleEmojiClick}
-                theme="dark"
-                width={300}
-                height={400}
-              />
-            </div>
-          )}
-
-          {/* Mentions Dropdown */}
-          {showMentions && filteredMembers.length > 0 && (
-            <div className="absolute bottom-full mb-2 left-4 bg-gray-800 border border-gray-600 rounded-lg shadow-xl max-h-32 overflow-y-auto min-w-48 z-50">
-              <div className="p-2">
-                {filteredMembers.slice(0, 5).map((member) => (
-                  <button
-                    key={member.id}
-                    onClick={() => handleMentionSelect(member)}
-                    className="w-full flex items-center gap-2 p-2 rounded hover:bg-gray-700/50 transition-colors text-left"
-                  >
-                    {member.avatarUrl ? (
-                      <img
-                        src={member.avatarUrl}
-                        alt={member.name}
-                        className="w-6 h-6 rounded-full"
-                      />
-                    ) : (
-                      <div className="w-6 h-6 rounded-full bg-gray-600 flex items-center justify-center">
-                        <User size={12} className="text-gray-400" />
-                      </div>
-                    )}
-                    <span className="text-sm text-white">{member.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Reply indicator */}
-          {replyingTo && (
-            <div className="flex items-center justify-between p-2 bg-gray-700/50 rounded-lg mb-2">
-              <div className="flex items-center gap-2">
-                <Reply size={14} className="text-orange-500" />
-                <span className="text-xs text-gray-400">
-                  Replying to {replyingTo.userName}
-                </span>
-                <span className="text-xs text-gray-500 truncate max-w-32">
-                  {replyingTo.content.substring(0, 50)}...
-                </span>
-              </div>
-              <button
-                onClick={() => setReplyingTo(null)}
-                className="text-gray-400 hover:text-white"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          )}
-
-          {/* Input form */}
-          <div className="flex items-end gap-2">
-            <div className="flex-1">
-              <textarea
-                ref={inputRef}
-                value={newMessage}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyPress}
-                placeholder="Type a message..."
-                className="w-full bg-gray-700 text-white placeholder-gray-400 border border-gray-600 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent resize-none"
-                rows={1}
-                disabled={sending}
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              {/* Emoji button */}
+    
+    CommunityAnalytics.trackCache(cacheKey, false);
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ members: CommunityMemberData[] }>(
+            <div ref={emojiPickerRef} className="absolute bottom-16 right-4 z-50">
+        { community_id: communityId }
+      );
+      
+      if (result.success && result.data) {
+        const members = result.data.members || [];
+        CommunityCache.set(cacheKey, members);
+        return { success: true, data: members };
+      }
+      
+      return result;
+    } catch (err) {
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  }, [callEdgeFunction]);
+  
+  // Get message reactions
+  const getMessageReactions = useCallback(async (
+    messageId: string
+  ): Promise<CommunityOperationResult<MessageReactionData[]>> => {
+    const cacheKey = `reactions_${messageId}`;
+    const cached = CommunityCache.get<MessageReactionData[]>(cacheKey);
+    
+    if (cached !== null) {
+      CommunityAnalytics.trackCache(cacheKey, true);
+      return { success: true, data: cached };
+    }
+    
+    CommunityAnalytics.trackCache(cacheKey, false);
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ reactions: MessageReactionData[] }>(
+        'get_message_reactions',
+        { message_id: messageId }
+      );
+      
+                placeholder="Type a message or use @ to mention a user"
+        const reactions = result.data.reactions || [];
+        CommunityCache.set(cacheKey, reactions, 2 * 60 * 1000); // 2 minute cache for reactions
+        return { success: true, data: reactions };
+      }
+              
+              {/* Emoji button inside input */}
               <button
                 type="button"
                 onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 p-1 text-gray-400 hover:text-orange-500 transition-colors"
                 title="Add emoji"
               >
-                <Smile size={20} />
+                <Smile size={18} />
               </button>
-
-              {/* Send button */}
-              <button
-                onClick={handleSendMessage}
-                disabled={sending || !newMessage.trim()}
-                className="p-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                title="Send message"
-              >
-                <Send size={20} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+      
+      return result;
+    } catch (err) {
+  const toggleMessageReaction = useCallback(async (
+    messageId: string
+  ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ reaction_added: boolean }>(
+        'toggle_reaction',
+    error,
+    verifyCommunityMembership,
+    getCommunityMembers,
+    getMessageReactions,
+    toggleMessageReaction,
+    clearCache
+  };
 }
