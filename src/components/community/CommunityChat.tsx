@@ -1,8 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
 import { useSupabase } from '../contexts/SupabaseContext';
-    const startTime = Date.now();
-import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
-import { CommunityCache } from '../lib/cache/CommunityCache';
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
 import { CommunityCache } from '../lib/cache/CommunityCache';
 import type { 
@@ -11,7 +8,6 @@ import type {
   CommunityMemberData,
   CommunityOperationError 
 } from '../types/community';
-
 
 export function useCommunityOperations() {
   const { user } = useSupabase();
@@ -90,16 +86,6 @@ export function useCommunityOperations() {
           params.community_id
         );
         
-        // Track successful operation
-        CommunityAnalytics.trackPerformance(
-          operation,
-          startTime,
-          true,
-          undefined,
-          user.id,
-          params.community_id
-        );
-        
         return { success: true, data: data };
       } catch (err) {
         lastError = err as Error;
@@ -120,16 +106,6 @@ export function useCommunityOperations() {
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
-    
-    // Track failed operation
-    CommunityAnalytics.trackPerformance(
-      operation,
-      startTime,
-      false,
-      lastError?.message,
-      user.id,
-      params.community_id
-    );
     
     // Track failed operation
     CommunityAnalytics.trackPerformance(
@@ -269,8 +245,34 @@ export function useCommunityOperations() {
     try {
       const result = await callEdgeFunction<{ reaction_added: boolean }>(
         'toggle_reaction',
-      )
+        { messageId },
+        'POST'
+      );
+      
+      // Invalidate reactions cache for this message
+      CommunityCache.invalidate(`reactions_${messageId}`);
+      
+      return result;
+    } catch (err) {
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
     }
+  }, [callEdgeFunction]);
+  
+  // Clear cache for a specific key or all cache
+  const clearCache = useCallback((key?: string) => {
+    if (key) {
+      CommunityCache.invalidate(key);
+    } else {
+      CommunityCache.clear();
+    }
+  }, []);
+  
+  return {
+    loading,
     error,
     verifyCommunityMembership,
     getCommunityMembers,
@@ -278,5 +280,4 @@ export function useCommunityOperations() {
     toggleMessageReaction,
     clearCache
   };
-  )
 }
