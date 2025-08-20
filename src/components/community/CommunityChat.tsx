@@ -1,425 +1,344 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { MessageCircle, Send, Users, AlertTriangle, Loader2, User, X, Heart, Reply, Trash2 } from 'lucide-react';
-import { useSupabase } from '../../contexts/SupabaseContext';
-import { useCommunity } from '../../hooks/useCommunity';
-import { CommunityChatService } from '../../lib/chat/CommunityChatService';
-import { Card } from '../ui/card';
-import type { CommunityMessage } from '../../lib/chat/CommunityChatService';
+import { useState, useCallback, useRef } from 'react';
+import { useSupabase } from '../contexts/SupabaseContext';
+    const startTime = Date.now();
+import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
+import { CommunityCache } from '../lib/cache/CommunityCache';
+import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
+import { CommunityCache } from '../lib/cache/CommunityCache';
+import type { 
+  CommunityOperationResult, 
+  MessageReactionData, 
+  CommunityMemberData,
+  CommunityOperationError 
+} from '../types/community';
 
-interface CommunityChatProps {
-  onError?: (error: Error) => void;
-}
 
-export function CommunityChat({ onError }: CommunityChatProps) {
+export function useCommunityOperations() {
   const { user } = useSupabase();
-  const { primaryCommunity } = useCommunity(user?.id);
-  const [messages, setMessages] = useState<CommunityMessage[]>([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [replyingTo, setReplyingTo] = useState<CommunityMessage | null>(null);
-  const [reactions, setReactions] = useState<Record<string, any[]>>({});
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
-
-  // Load messages when component mounts or community changes
-  useEffect(() => {
-    if (!primaryCommunity?.id || !user) {
-      setMessages([]);
-      setLoading(false);
-      return;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<CommunityOperationError | null>(null);
+  
+  // Generic Edge Function caller with retry logic
+  const callEdgeFunction = useCallback(async <T>(
+    operation: string,
+    params: Record<string, any> = {},
+    method: 'GET' | 'POST' = 'GET',
+    maxRetries: number = 3
+  ): Promise<CommunityOperationResult<T>> => {
+    if (!user) {
+      return { success: false, error: 'User not authenticated' };
     }
-
-    const loadMessages = async () => {
+    
+    const startTime = Date.now();
+    let lastError: Error | null = null;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        setLoading(true);
-        setError(null);
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          throw new Error('No active session');
+        }
         
-        const fetchedMessages = await CommunityChatService.getMessages(primaryCommunity.id);
-        setMessages(fetchedMessages);
+        // Build URL with query params for GET requests
+        const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations`);
+        url.searchParams.set('operation', operation);
         
-        // Load reactions for all messages
-        const reactionPromises = fetchedMessages.map(async (msg) => {
-          try {
-            const msgReactions = await CommunityChatService.getMessageReactions(msg.id);
-            return { messageId: msg.id, reactions: msgReactions };
-          } catch (err) {
-            console.warn(`Failed to load reactions for message ${msg.id}:`, err);
-            return { messageId: msg.id, reactions: [] };
-          }
-        });
+        if (method === 'GET') {
+          Object.entries(params).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) {
+              url.searchParams.set(key, String(value));
+            }
+          });
+        }
         
-        const reactionResults = await Promise.all(reactionPromises);
-        const reactionMap: Record<string, any[]> = {};
-        reactionResults.forEach(({ messageId, reactions: msgReactions }) => {
-          reactionMap[messageId] = msgReactions;
-        });
-        setReactions(reactionMap);
+        const requestOptions: RequestInit = {
+          method,
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+  const handleEmojiClick = (emojiData: any) => {
+    setNewMessage(prev => prev + emojiData.emoji);
+    setShowEmojiPicker(false);
+  };
+
+  const handleMentionDetection = (content: string) => {
+    // Simple @ mention detection - could be enhanced later
+    const mentionRegex = /@(\w+)/g;
+    return content.replace(mentionRegex, '<span class="text-orange-500 font-bold">@$1</span>');
+  };
+          // Add timeout
+          signal: AbortSignal.timeout(10000)
+        };
+        
+        if (method === 'POST') {
+          requestOptions.body = JSON.stringify(params);
+        }
+        
+        const response = await fetch(url.toString(), requestOptions);
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
+    <Card className="flex flex-col h-[500px]">
+        const data = await response.json();
+        
+        if (!data.success) {
+          const error = new Error(data.error || 'Operation failed') as CommunityOperationError;
+          error.retryable = response.status >= 500; // Server errors are retryable
+          throw error;
+        }
+        
+        // Track successful operation
+        CommunityAnalytics.trackPerformance(
+          operation,
+          startTime,
+          true,
+          undefined,
+          user.id,
+          params.community_id
+        );
+        
+        // Track successful operation
+        CommunityAnalytics.trackPerformance(
+          operation,
+          startTime,
+          true,
+          undefined,
+          user.id,
+          params.community_id
+        );
+        
+        return { success: true, data: data };
       } catch (err) {
-        console.error('Error loading community messages:', err);
-        const errorMessage = err instanceof Error ? err.message : 'Failed to load messages';
-        setError(errorMessage);
-        if (onError) {
-          onError(err instanceof Error ? err : new Error(errorMessage));
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadMessages();
-  }, [primaryCommunity?.id, user, onError]);
-
-  // Subscribe to new messages with proper cleanup
-  useEffect(() => {
-    if (!primaryCommunity?.id) return;
-
-    // Clean up previous subscription
-    if (subscriptionRef.current) {
-      subscriptionRef.current.unsubscribe();
-    }
-
-    try {
-      subscriptionRef.current = CommunityChatService.subscribeToMessages(
-        primaryCommunity.id,
-        (newMessage) => {
-          // Add new messages to END of array (newest at bottom)
-          setMessages(prev => [...prev, newMessage]);
-        },
-        (deletedMessageId) => {
-          setMessages(prev => prev.filter(msg => msg.id !== deletedMessageId));
-        }
-      );
-    } catch (err) {
-      console.error('Error setting up message subscription:', err);
-    }
-
-    return () => {
-      if (subscriptionRef.current) {
-        subscriptionRef.current.unsubscribe();
-      }
-    };
-  }, [primaryCommunity?.id]);
-
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
-
-  const handleSendMessage = useCallback(async () => {
-    if (!newMessage.trim() || !primaryCommunity?.id || !user || sending) return;
-
-    try {
-      setSending(true);
-      setError(null);
-
-      await CommunityChatService.sendMessage(
-        user.id,
-        primaryCommunity.id,
-        newMessage.trim(),
-        undefined,
-        replyingTo?.id
-      );
-
-      setNewMessage('');
-      setReplyingTo(null);
-    } catch (err) {
-      console.error('Error sending message:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
-      setError(errorMessage);
-      if (onError) {
-        onError(err instanceof Error ? err : new Error(errorMessage));
-      }
-    } finally {
-      setSending(false);
-    }
-  }, [newMessage, primaryCommunity?.id, user, sending, replyingTo, onError]);
-
-  const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  }, [handleSendMessage]);
-
-  const handleToggleReaction = useCallback(async (messageId: string) => {
-    if (!user) return;
-
-    try {
-      const reactionAdded = await CommunityChatService.toggleReaction(user.id, messageId);
-      
-      // Update local reactions state
-      setReactions(prev => {
-        const messageReactions = prev[messageId] || [];
+        lastError = err as Error;
         
-        if (reactionAdded) {
-          // Add new reaction
-          const newReaction = {
-            id: `temp-${Date.now()}`,
-            user_id: user.id,
-            user_name: user.user_metadata?.name || 'You',
-            created_at: new Date().toISOString()
-          };
-          return {
-            ...prev,
-            [messageId]: [...messageReactions, newReaction]
-          };
-        } else {
-          // Remove reaction
-          return {
-            ...prev,
-            [messageId]: messageReactions.filter(r => r.user_id !== user.id)
-          };
+        // Don't retry on client errors (4xx) or authentication errors
+        if (err instanceof Error) {
+          const isRetryable = (err as CommunityOperationError).retryable !== false &&
+                             !err.message.includes('authentication') &&
+                             !err.message.includes('not a member');
+          
+          if (!isRetryable || attempt === maxRetries - 1) {
+            break;
+          }
         }
-      });
-    } catch (err) {
-      console.error('Error toggling reaction:', err);
+        
+        // Exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
-  }, [user]);
-
-  const handleDeleteMessage = useCallback(async (messageId: string) => {
-    if (!user) return;
-
-    try {
-      await CommunityChatService.deleteMessage(user.id, messageId);
-      // Message will be removed via real-time subscription
-    } catch (err) {
-      console.error('Error deleting message:', err);
-      setError('Failed to delete message');
-    }
-  }, [user]);
-
-  if (!primaryCommunity) {
-    return (
-      <Card className="p-6">
-        <div className="text-center">
-          <Users className="mx-auto mb-4 text-gray-400" size={48} />
-          <h3 className="text-lg font-semibold text-white mb-2">No Community Selected</h3>
-          <p className="text-gray-400">Join a community to start chatting with other members.</p>
-        </div>
-      </Card>
+    
+    // Track failed operation
+    CommunityAnalytics.trackPerformance(
+      operation,
+      startTime,
+      false,
+      lastError?.message,
+      user.id,
+      params.community_id
     );
-  }
-
-  return (
-    <Card className="flex flex-col h-96">
-      {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-700">
-        <div className="flex items-center gap-2">
-          <MessageCircle className="text-orange-500" size={20} />
-          <h3 className="text-lg font-semibold text-white">{primaryCommunity.name}</h3>
-        </div>
-        <div className="text-sm text-gray-400">
-          {messages.length} messages
-        </div>
-      </div>
-
-      {/* Reply Banner */}
-      {replyingTo && (
-        <div className="flex items-center justify-between p-2 bg-gray-700/50 border-b border-gray-600">
-          <div className="flex items-center gap-2">
-            <Reply size={14} className="text-orange-500" />
-            <span className="text-xs text-gray-400">Replying to</span>
-            <span className="text-xs text-white font-medium">{replyingTo.userName}</span>
-            <span className="text-xs text-gray-400 truncate max-w-32">
-              {replyingTo.content.substring(0, 50)}...
-            </span>
-          </div>
-          <button
-            onClick={() => setReplyingTo(null)}
-            className="text-gray-400 hover:text-white transition-colors"
-          >
-            <X size={16} />
-          </button>
-        </div>
-      )}
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {loading ? (
-          <div className="flex items-center justify-center h-full">
-            <Loader2 className="animate-spin text-orange-500" size={24} />
-          </div>
-        ) : error ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <AlertTriangle className="mx-auto mb-2 text-red-400" size={24} />
-              <p className="text-red-400 text-sm">{error}</p>
-            </div>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <MessageCircle className="mx-auto mb-2 text-gray-400" size={24} />
-              <p className="text-gray-400">No messages yet</p>
-              <p className="text-gray-500 text-sm">Be the first to start the conversation!</p>
-            </div>
-          </div>
-        ) : (
-          <>
-            {messages.map((message) => {
-              const isMyMessage = message.userId === user?.id;
-              const messageReactions = reactions[message.id] || [];
-              const hasReacted = messageReactions.some(r => r.user_id === user?.id);
-              
-              return (
-                <div
-                  key={message.id}
-                  className="group"
-                >
-                  <div
-                    className={`flex ${isMyMessage ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div className="flex items-end gap-2 max-w-[80%]">
-                      {/* Avatar for other users */}
-                      {!isMyMessage && (
-                        message.userAvatarUrl ? (
-                          <img
-                            src={message.userAvatarUrl}
-                            alt={message.userName}
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
-                            <User className="text-gray-400" size={16} />
-                          </div>
-                        )
-                      )}
-
-                      <div className="flex flex-col">
-                        <div
-                          className={`rounded-lg p-3 ${
-                            isMyMessage
-                              ? 'bg-gray-800 border-2 border-orange-500 text-white rounded-br-none'
-                              : 'bg-gray-700 border-2 border-green-500 text-gray-100 rounded-bl-none'
-                          }`}
-                        >
-                          {/* User name for other messages */}
-                          {!isMyMessage && (
-                            <div className="text-xs text-green-400 font-medium mb-1">
-                              {message.userName}
-                            </div>
-                          )}
-                          
-                          {/* Message content */}
-                          <div className="text-sm">{message.content}</div>
-                          
-                          {/* Media */}
-                          {message.mediaUrl && (
-                            <div className="mt-2">
-                              {message.mediaType === 'image' ? (
-                                <img
-                                  src={message.mediaUrl}
-                                  alt="Message attachment"
-                                  className="max-w-sm max-h-48 object-contain rounded"
-                                />
-                              ) : (
-                                <video
-                                  src={message.mediaUrl}
-                                  controls
-                                  className="max-w-sm max-h-48 object-contain rounded"
-                                />
-                              )}
-                            </div>
-                          )}
-                          
-                          {/* Timestamp and actions */}
-                          <div className="flex items-center justify-between mt-2">
-                            <div className="text-xs opacity-75">
-                              {new Date(message.createdAt).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit'
-                              })}
-                            </div>
-                            
-                            {/* Message actions - show on hover */}
-                            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                              {/* Reply button */}
-                              <button
-                                onClick={() => setReplyingTo(message)}
-                                className="text-gray-400 hover:text-orange-500 transition-colors"
-                                title="Reply"
-                              >
-                                <Reply size={14} />
-                              </button>
-                              
-                              {/* Like button - only for other users' messages */}
-                              {!isMyMessage && (
-                                <button
-                                  onClick={() => handleToggleReaction(message.id)}
-                                  className={`transition-colors ${
-                                    hasReacted 
-                                      ? 'text-red-500 hover:text-red-400' 
-                                      : 'text-gray-400 hover:text-red-500'
-                                  }`}
-                                  title={hasReacted ? 'Unlike' : 'Like'}
-                                >
-                                  <Heart size={14} fill={hasReacted ? 'currentColor' : 'none'} />
-                                </button>
-                              )}
-                              
-                              {/* Delete button - only for own messages */}
-                              {isMyMessage && (
-                                <button
-                                  onClick={() => handleDeleteMessage(message.id)}
-                                  className="text-gray-400 hover:text-red-500 transition-colors"
-                                  title="Delete"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                          
-                          {/* Reactions display */}
-                          {messageReactions.length > 0 && (
-                            <div className="flex items-center gap-1 mt-2">
-                              <Heart size={12} className="text-red-500" />
-                              <span className="text-xs text-gray-400">
-                                {messageReactions.length} {messageReactions.length === 1 ? 'like' : 'likes'}
-                              </span>
-                            </div>
-                          )}
+              const isReply = !!message.parentMessageId;
+              const parentMessage = isReply ? messages.find(m => m.id === message.parentMessageId) : null;
+    
+    // Track failed operation
+    CommunityAnalytics.trackPerformance(
+      operation,
+      startTime,
+      false,
+                  {/* Show parent message if this is a reply */}
+                  {isReply && parentMessage && (
+                    <div className={`mb-2 ml-4 ${isMyMessage ? 'mr-8' : 'ml-12'}`}>
+                      <div className="bg-gray-600/30 border-l-2 border-orange-500/50 pl-3 py-2 rounded-r-lg">
+                        <div className="text-xs text-orange-500 font-medium mb-1">
+                          Replying to {parentMessage.userName}
+                        </div>
+                        <div className="text-xs text-gray-400 truncate">
+                          {parentMessage.content.substring(0, 100)}...
                         </div>
                       </div>
                     </div>
-                  </div>
-                </div>
-              );
-            })}
-            <div ref={messagesEndRef} />
-          </>
+                  )}
+                  
+      lastError?.message,
+      user.id,
+      params.community_id
+    );
+    
+    return { 
+      success: false, 
+      error: lastError?.message || 'Operation failed after retries' 
+    };
+  }, [user]);
+  
+  // Verify community membership with caching
+  const verifyCommunityMembership = useCallback(async (
+    communityId: string
+  ): Promise<CommunityOperationResult<boolean>> => {
+    const cacheKey = `membership_${user?.id}_${communityId}`;
+    const cached = CommunityCache.get<boolean>(cacheKey);
+    
+    if (cached !== null) {
+      return { success: true, data: cached };
+    }
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ is_member: boolean }>(
+        'verify_membership',
+        { community_id: communityId }
+      );
+      
+      if (result.success && result.data) {
+        const isMember = result.data.is_member;
+        CommunityCache.set(cacheKey, isMember);
+        return { success: true, data: isMember };
+                          <div 
+                            className="text-sm"
+                            dangerouslySetInnerHTML={{
+                              __html: handleMentionDetection(message.content)
+                            }}
+                          />
+      
+      return result;
+    } catch (err) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id, callEdgeFunction]);
+  
+  // Get community members with caching
+  const getCommunityMembers = useCallback(async (
+    communityId: string
+  ): Promise<CommunityOperationResult<CommunityMemberData[]>> => {
+    const cacheKey = `members_${communityId}`;
+    const cached = CommunityCache.get<CommunityMemberData[]>(cacheKey);
+    
+    if (cached !== null) {
+      CommunityAnalytics.trackCache(cacheKey, true);
+      return { success: true, data: cached };
+    }
+    
+    CommunityAnalytics.trackCache(cacheKey, false);
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ members: CommunityMemberData[] }>(
+                            <div className="flex items-center gap-2">
+        { community_id: communityId }
+      );
+      
+      if (result.success && result.data) {
+        const members = result.data.members || [];
+        CommunityCache.set(cacheKey, members);
+        return { success: true, data: members };
+      }
+      
+      return result;
+    } catch (err) {
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+                                      ? 'text-orange-500 hover:text-orange-400' 
+                                      : 'text-gray-400 hover:text-orange-500'
+  }, [callEdgeFunction]);
+  
+  // Get message reactions
+                                  <Zap size={14} fill={hasReacted ? 'currentColor' : 'none'} />
+    messageId: string
+  ): Promise<CommunityOperationResult<MessageReactionData[]>> => {
+    const cacheKey = `reactions_${messageId}`;
+    const cached = CommunityCache.get<MessageReactionData[]>(cacheKey);
+    
+    if (cached !== null) {
+      CommunityAnalytics.trackCache(cacheKey, true);
+      return { success: true, data: cached };
+    }
+    
+    CommunityAnalytics.trackCache(cacheKey, false);
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await callEdgeFunction<{ reactions: MessageReactionData[] }>(
+        'get_message_reactions',
+        { message_id: messageId }
+      );
+                              <Zap size={12} className="text-orange-500" />
+      if (result.success && result.data) {
+        const reactions = result.data.reactions || [];
+        CommunityCache.set(cacheKey, reactions, 2 * 60 * 1000); // 2 minute cache for reactions
+        return { success: true, data: reactions };
+      }
+      const sentMessage = await CommunityChatService.sendMessage(
+      
+    } catch (err) {
+      const error = err as CommunityOperationError;
+      setError(error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+      // Add message immediately to UI for instant feedback
+  }, [callEdgeFunction]);
+      if (sentMessage) {
+  
+        setMessages(prev => [...prev, sentMessage]);
+        {/* Emoji Picker */}
+        {showEmojiPicker && (
+          <div ref={emojiPickerRef} className="absolute bottom-full mb-2 right-4 z-50">
+            <EmojiPicker
+              onEmojiClick={handleEmojiClick}
+              theme="dark"
+              width={300}
+              height={400}
+            />
+          </div>
         )}
-      </div>
-
-      {/* Input */}
-      <div className="p-4 border-t border-gray-700">
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder={replyingTo ? `Reply to ${replyingTo.userName}...` : "Type a message..."}
-            disabled={sending}
-            className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-50"
-          />
+        
+  // Toggle message reaction
+          {/* Emoji button */}
           <button
-            onClick={handleSendMessage}
-            disabled={!newMessage.trim() || sending}
-            className="bg-orange-500 text-white rounded-lg p-2 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            type="button"
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className="p-2 text-gray-400 hover:text-orange-500 transition-colors"
+            title="Add emoji"
           >
-            {sending ? (
-              <Loader2 className="animate-spin" size={20} />
-            ) : (
-              <Send size={20} />
-            )}
+            <Smile size={20} />
           </button>
-        </div>
-      </div>
-    </Card>
-  );
+          
+        // Scroll to bottom immediately
+  const toggleMessageReaction = useCallback(async (
+        setTimeout(() => {
+    messageId: string
+          if (messagesEndRef.current) {
+  ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    setLoading(true);
+          }
+    setError(null);
+        }, 50);
+    
+      }
+    try {
+
+      const result = await callEdgeFunction<{ reaction_added: boolean }>(
+        'toggle_reaction',
+    error,
+    verifyCommunityMembership,
+    getCommunityMembers,
+    getMessageReactions,
+    toggleMessageReaction,
+    clearCache
+  };
 }
