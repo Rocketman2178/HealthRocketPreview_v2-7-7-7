@@ -4,9 +4,10 @@ import { Trophy, Target, Zap } from 'lucide-react';
 interface TabNavProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
+}
 
 export function TabNav({ activeTab, onTabChange }: TabNavProps) {
-export function TabNav({ activeTab, onTabChange }: TabNavProps) {
+  const tabs = [
     {
       id: 'standings',
       label: 'Player Standings',
@@ -14,6 +15,8 @@ export function TabNav({ activeTab, onTabChange }: TabNavProps) {
     },
     {
       id: 'boosts',
+      label: 'Boosts',
+      icon: Zap
     }
   ];
 
