@@ -1,6 +1,10 @@
 # This file contains patterns for files that should be ignored by Bolt
 # These files will still exist in your project, but won't be loaded into Bolt's context
 
+# === STEP 1: EXCLUDE LARGE LOCK FILES (IMMEDIATE SIZE REDUCTION) ===
+/package-lock.json
+/yarn.lock
+
 # Quest-related files
 /src/data/quests/
 /src/lib/quest/
