@@ -65,16 +65,20 @@ export default defineConfig({
   server: {
     // Fast refresh for Health Rocket development
     hmr: {
-      overlay: true,
-      port: 24678
+      overlay: true
     },
     
-    // Network access configuration
-    host: '0.0.0.0',
+    // Network access configuration for Bolt.new
+    host: true,
     port: 5173,
+    strictPort: false,  // Allow automatic port switching
     
     // Enable CORS for Health Rocket API integrations
-    cors: true
+    cors: true,
+    
+    // Optimize for Bolt.new environment
+    open: false,  // Don't auto-open browser in Bolt
+    clearScreen: false  // Keep terminal output visible
   },
 
   // === DEPENDENCY PRE-BUNDLING OPTIMIZATION ===
