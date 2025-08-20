@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { MessageCircle, Send, Users, AlertTriangle, Loader2, User, X, Image, Smile } from 'lucide-react';
+import { MessageCircle, Send, Users, AlertTriangle, Loader2, User, X, Heart, Reply, Trash2 } from 'lucide-react';
 import { useSupabase } from '../../contexts/SupabaseContext';
 import { useCommunity } from '../../hooks/useCommunity';
 import { CommunityChatService } from '../../lib/chat/CommunityChatService';
@@ -18,6 +18,8 @@ export function CommunityChat({ onError }: CommunityChatProps) {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<CommunityMessage | null>(null);
+  const [reactions, setReactions] = useState<Record<string, any[]>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
 
@@ -36,6 +38,24 @@ export function CommunityChat({ onError }: CommunityChatProps) {
         
         const fetchedMessages = await CommunityChatService.getMessages(primaryCommunity.id);
         setMessages(fetchedMessages);
+        
+        // Load reactions for all messages
+        const reactionPromises = fetchedMessages.map(async (msg) => {
+          try {
+            const msgReactions = await CommunityChatService.getMessageReactions(msg.id);
+            return { messageId: msg.id, reactions: msgReactions };
+          } catch (err) {
+            console.warn(`Failed to load reactions for message ${msg.id}:`, err);
+            return { messageId: msg.id, reactions: [] };
+          }
+        });
+        
+        const reactionResults = await Promise.all(reactionPromises);
+        const reactionMap: Record<string, any[]> = {};
+        reactionResults.forEach(({ messageId, reactions: msgReactions }) => {
+          reactionMap[messageId] = msgReactions;
+        });
+        setReactions(reactionMap);
       } catch (err) {
         console.error('Error loading community messages:', err);
         const errorMessage = err instanceof Error ? err.message : 'Failed to load messages';
@@ -51,7 +71,7 @@ export function CommunityChat({ onError }: CommunityChatProps) {
     loadMessages();
   }, [primaryCommunity?.id, user, onError]);
 
-  // Subscribe to new messages
+  // Subscribe to new messages with proper cleanup
   useEffect(() => {
     if (!primaryCommunity?.id) return;
 
@@ -64,6 +84,7 @@ export function CommunityChat({ onError }: CommunityChatProps) {
       subscriptionRef.current = CommunityChatService.subscribeToMessages(
         primaryCommunity.id,
         (newMessage) => {
+          // Add new messages to END of array (newest at bottom)
           setMessages(prev => [...prev, newMessage]);
         },
         (deletedMessageId) => {
@@ -98,10 +119,13 @@ export function CommunityChat({ onError }: CommunityChatProps) {
       await CommunityChatService.sendMessage(
         user.id,
         primaryCommunity.id,
-        newMessage.trim()
+        newMessage.trim(),
+        undefined,
+        replyingTo?.id
       );
 
       setNewMessage('');
+      setReplyingTo(null);
     } catch (err) {
       console.error('Error sending message:', err);
       const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
@@ -112,7 +136,7 @@ export function CommunityChat({ onError }: CommunityChatProps) {
     } finally {
       setSending(false);
     }
-  }, [newMessage, primaryCommunity?.id, user, sending, onError]);
+  }, [newMessage, primaryCommunity?.id, user, sending, replyingTo, onError]);
 
   const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -120,6 +144,53 @@ export function CommunityChat({ onError }: CommunityChatProps) {
       handleSendMessage();
     }
   }, [handleSendMessage]);
+
+  const handleToggleReaction = useCallback(async (messageId: string) => {
+    if (!user) return;
+
+    try {
+      const reactionAdded = await CommunityChatService.toggleReaction(user.id, messageId);
+      
+      // Update local reactions state
+      setReactions(prev => {
+        const messageReactions = prev[messageId] || [];
+        
+        if (reactionAdded) {
+          // Add new reaction
+          const newReaction = {
+            id: `temp-${Date.now()}`,
+            user_id: user.id,
+            user_name: user.user_metadata?.name || 'You',
+            created_at: new Date().toISOString()
+          };
+          return {
+            ...prev,
+            [messageId]: [...messageReactions, newReaction]
+          };
+        } else {
+          // Remove reaction
+          return {
+            ...prev,
+            [messageId]: messageReactions.filter(r => r.user_id !== user.id)
+          };
+        }
+      });
+    } catch (err) {
+      console.error('Error toggling reaction:', err);
+    }
+  }, [user]);
+
+  const handleDeleteMessage = useCallback(async (messageId: string) => {
+    if (!user) return;
+
+    try {
+      await CommunityChatService.deleteMessage(user.id, messageId);
+      // Message will be removed via real-time subscription
+    } catch (err) {
+      console.error('Error deleting message:', err);
+      setError('Failed to delete message');
+    }
+  }, [user]);
 
   if (!primaryCommunity) {
     return (
@@ -146,6 +217,26 @@ export function CommunityChat({ onError }: CommunityChatProps) {
         </div>
       </div>
 
+      {/* Reply Banner */}
+      {replyingTo && (
+        <div className="flex items-center justify-between p-2 bg-gray-700/50 border-b border-gray-600">
+          <div className="flex items-center gap-2">
+            <Reply size={14} className="text-orange-500" />
+            <span className="text-xs text-gray-400">Replying to</span>
+            <span className="text-xs text-white font-medium">{replyingTo.userName}</span>
+            <span className="text-xs text-gray-400 truncate max-w-32">
+              {replyingTo.content.substring(0, 50)}...
+            </span>
+          </div>
+          <button
+            onClick={() => setReplyingTo(null)}
+            className="text-gray-400 hover:text-white transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {loading ? (
@@ -169,33 +260,136 @@ export function CommunityChat({ onError }: CommunityChatProps) {
           </div>
         ) : (
           <>
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'}`}
-              >
+            {messages.map((message) => {
+              const isMyMessage = message.userId === user?.id;
+              const messageReactions = reactions[message.id] || [];
+              const hasReacted = messageReactions.some(r => r.user_id === user?.id);
+              
+              return (
                 <div
-                  className={`max-w-[70%] rounded-lg p-3 ${
-                    message.userId === user?.id
-                      ? 'bg-orange-500 text-white'
-                      : 'bg-gray-700 text-gray-100'
-                  }`}
+                  key={message.id}
+                  className="group"
                 >
-                  {message.userId !== user?.id && (
-                    <div className="text-xs text-orange-400 mb-1 font-medium">
-                      {message.userName}
+                  <div
+                    className={`flex ${isMyMessage ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className="flex items-end gap-2 max-w-[80%]">
+                      {/* Avatar for other users */}
+                      {!isMyMessage && (
+                        message.userAvatarUrl ? (
+                          <img
+                            src={message.userAvatarUrl}
+                            alt={message.userName}
+                            className="w-8 h-8 rounded-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
+                            <User className="text-gray-400" size={16} />
+                          </div>
+                        )
+                      )}
+
+                      <div className="flex flex-col">
+                        <div
+                          className={`rounded-lg p-3 ${
+                            isMyMessage
+                              ? 'bg-gray-800 border-2 border-orange-500 text-white rounded-br-none'
+                              : 'bg-gray-700 border-2 border-green-500 text-gray-100 rounded-bl-none'
+                          }`}
+                        >
+                          {/* User name for other messages */}
+                          {!isMyMessage && (
+                            <div className="text-xs text-green-400 font-medium mb-1">
+                              {message.userName}
+                            </div>
+                          )}
+                          
+                          {/* Message content */}
+                          <div className="text-sm">{message.content}</div>
+                          
+                          {/* Media */}
+                          {message.mediaUrl && (
+                            <div className="mt-2">
+                              {message.mediaType === 'image' ? (
+                                <img
+                                  src={message.mediaUrl}
+                                  alt="Message attachment"
+                                  className="max-w-sm max-h-48 object-contain rounded"
+                                />
+                              ) : (
+                                <video
+                                  src={message.mediaUrl}
+                                  controls
+                                  className="max-w-sm max-h-48 object-contain rounded"
+                                />
+                              )}
+                            </div>
+                          )}
+                          
+                          {/* Timestamp and actions */}
+                          <div className="flex items-center justify-between mt-2">
+                            <div className="text-xs opacity-75">
+                              {new Date(message.createdAt).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })}
+                            </div>
+                            
+                            {/* Message actions - show on hover */}
+                            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              {/* Reply button */}
+                              <button
+                                onClick={() => setReplyingTo(message)}
+                                className="text-gray-400 hover:text-orange-500 transition-colors"
+                                title="Reply"
+                              >
+                                <Reply size={14} />
+                              </button>
+                              
+                              {/* Like button - only for other users' messages */}
+                              {!isMyMessage && (
+                                <button
+                                  onClick={() => handleToggleReaction(message.id)}
+                                  className={`transition-colors ${
+                                    hasReacted 
+                                      ? 'text-red-500 hover:text-red-400' 
+                                      : 'text-gray-400 hover:text-red-500'
+                                  }`}
+                                  title={hasReacted ? 'Unlike' : 'Like'}
+                                >
+                                  <Heart size={14} fill={hasReacted ? 'currentColor' : 'none'} />
+                                </button>
+                              )}
+                              
+                              {/* Delete button - only for own messages */}
+                              {isMyMessage && (
+                                <button
+                                  onClick={() => handleDeleteMessage(message.id)}
+                                  className="text-gray-400 hover:text-red-500 transition-colors"
+                                  title="Delete"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          
+                          {/* Reactions display */}
+                          {messageReactions.length > 0 && (
+                            <div className="flex items-center gap-1 mt-2">
+                              <Heart size={12} className="text-red-500" />
+                              <span className="text-xs text-gray-400">
+                                {messageReactions.length} {messageReactions.length === 1 ? 'like' : 'likes'}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  )}
-                  <div className="text-sm">{message.content}</div>
-                  <div className="text-xs opacity-75 mt-1">
-                    {new Date(message.createdAt).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit'
-                    })}
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div ref={messagesEndRef} />
           </>
         )}
@@ -209,7 +403,7 @@ export function CommunityChat({ onError }: CommunityChatProps) {
             value={newMessage}
             onChange={(e) => setNewMessage(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder="Type a message..."
+            placeholder={replyingTo ? `Reply to ${replyingTo.userName}...` : "Type a message..."}
             disabled={sending}
             className="flex-1 bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-50"
           />

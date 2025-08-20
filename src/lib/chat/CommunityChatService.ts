@@ -28,7 +28,7 @@ export interface CommunityMention {
 
 export class CommunityChatService {
   /**
-   * Get messages for a community
+   * Get messages for a community using direct RPC call
    */
   static async getMessages(
     communityId: string,
@@ -36,40 +36,17 @@ export class CommunityChatService {
     offset: number = 0
   ): Promise<CommunityMessage[]> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
+      // Use direct RPC call instead of edge function to avoid AbortError
+      const { data, error } = await supabase.rpc('get_community_chat_messages', {
+        p_community_id: communityId,
+        p_limit: limit,
+        p_offset: offset
+      });
 
-      // Create abort controller for 10-second timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      if (error) throw error;
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat?action=get_messages&community_id=${communityId}&limit=${limit}&offset=${offset}`,
-        {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          signal: controller.signal,
-        }
-      );
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to fetch messages');
-      }
-
-      return data.messages?.map((msg: any) => ({
+      // Transform and sort messages OLDEST FIRST for proper chat order
+      const messages = (data || []).map((msg: any) => ({
         id: msg.id,
         communityId: msg.community_id,
         userId: msg.user_id,
@@ -80,9 +57,12 @@ export class CommunityChatService {
         replyCount: msg.reply_count || 0,
         createdAt: new Date(msg.created_at),
         updatedAt: new Date(msg.updated_at),
-        userName: msg.user_name,
+        userName: msg.user_name || 'Unknown User',
         userAvatarUrl: msg.user_avatar_url
-      })) || [];
+      }));
+
+      // Sort oldest first (proper chat order)
+      return messages.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     } catch (err) {
       console.error('Error fetching community messages:', err);
       throw new DatabaseError('Failed to fetch messages');
@@ -90,7 +70,7 @@ export class CommunityChatService {
   }
 
   /**
-   * Send a message to community chat using edge function
+   * Send a message using direct Supabase insert
    */
   static async sendMessage(
     userId: string,
@@ -100,15 +80,10 @@ export class CommunityChatService {
     parentMessageId?: string
   ): Promise<CommunityMessage> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
-
       let mediaPublicUrl: string | null = null;
       let mediaType: 'image' | 'video' | null = null;
 
-      // Handle media upload
+      // Handle media upload if provided
       if (mediaFile) {
         const fileExt = mediaFile.name.split('.').pop()?.toLowerCase();
         const fileName = `${Date.now()}.${fileExt}`;
@@ -128,48 +103,57 @@ export class CommunityChatService {
         mediaType = mediaFile.type.startsWith('video/') ? 'video' : 'image';
       }
 
-      // Send message via edge function
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat?action=send_message`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            communityId,
-            content,
-            mediaUrl: mediaPublicUrl,
-            mediaType,
-            parentMessageId
-          })
-        }
-      );
+      // Get user name for the message
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('name, avatar_url')
+        .eq('id', userId)
+        .single();
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      if (userError) throw userError;
 
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to send message');
-      }
+      // Insert message directly into database
+      const { data: newMessage, error: insertError } = await supabase
+        .from('community_chat_messages')
+        .insert({
+          user_id: userId,
+          community_id: communityId,
+          content: content.trim(),
+          media_url: mediaPublicUrl,
+          media_type: mediaType,
+          parent_message_id: parentMessageId,
+          user_name: userData.name || 'Unknown User'
+        })
+        .select(`
+          id,
+          community_id,
+          user_id,
+          content,
+          media_url,
+          media_type,
+          parent_message_id,
+          reply_count,
+          created_at,
+          updated_at,
+          user_name
+        `)
+        .single();
+
+      if (insertError) throw insertError;
 
       return {
-        id: data.message.id,
-        communityId: data.message.community_id,
-        userId: data.message.user_id,
-        content: data.message.content,
-        mediaUrl: data.message.media_url,
-        mediaType: data.message.media_type,
-        parentMessageId: data.message.parent_message_id,
-        replyCount: data.message.reply_count || 0,
-        createdAt: new Date(data.message.created_at),
-        updatedAt: new Date(data.message.updated_at),
-        userName: data.message.user_name || '',
-        userAvatarUrl: data.message.user_avatar_url
+        id: newMessage.id,
+        communityId: newMessage.community_id,
+        userId: newMessage.user_id,
+        content: newMessage.content,
+        mediaUrl: newMessage.media_url,
+        mediaType: newMessage.media_type,
+        parentMessageId: newMessage.parent_message_id,
+        replyCount: newMessage.reply_count || 0,
+        createdAt: new Date(newMessage.created_at),
+        updatedAt: new Date(newMessage.updated_at),
+        userName: newMessage.user_name,
+        userAvatarUrl: userData.avatar_url
       };
     } catch (err) {
       console.error('Error sending message:', err);
@@ -178,37 +162,17 @@ export class CommunityChatService {
   }
 
   /**
-   * Delete a message using edge function
+   * Delete a message
    */
   static async deleteMessage(userId: string, messageId: string): Promise<void> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
+      const { error } = await supabase
+        .from('community_chat_messages')
+        .delete()
+        .eq('id', messageId)
+        .eq('user_id', userId); // Users can only delete their own messages
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-chat?action=delete_message`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ messageId })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to delete message');
-      }
-
+      if (error) throw error;
     } catch (err) {
       console.error('Error deleting message:', err);
       throw new DatabaseError('Failed to delete message');
@@ -216,7 +180,7 @@ export class CommunityChatService {
   }
 
   /**
-   * Subscribe to new messages in community (deprecated - use direct Supabase subscription)
+   * Subscribe to new messages with proper cleanup
    */
   static subscribeToMessages(
     communityId: string,
@@ -273,6 +237,85 @@ export class CommunityChatService {
   }
 
   /**
+   * Toggle reaction on a community message
+   */
+  static async toggleReaction(userId: string, messageId: string): Promise<boolean> {
+    try {
+      // Check if user already reacted to this message
+      const { data: existingReaction, error: checkError } = await supabase
+        .from('community_message_reactions')
+        .select('id')
+        .eq('message_id', messageId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (checkError) throw checkError;
+
+      // If user already reacted, remove the reaction (toggle behavior)
+      if (existingReaction) {
+        const { error: deleteError } = await supabase
+          .from('community_message_reactions')
+          .delete()
+          .eq('id', existingReaction.id);
+
+        if (deleteError) throw deleteError;
+        return false; // Reaction removed
+      }
+
+      // Otherwise, add a new reaction
+      const { error: insertError } = await supabase
+        .from('community_message_reactions')
+        .insert({
+          message_id: messageId,
+          user_id: userId
+        });
+
+      if (insertError) throw insertError;
+      return true; // Reaction added
+    } catch (err) {
+      console.error('Error toggling reaction:', err);
+      throw new DatabaseError('Failed to toggle reaction');
+    }
+  }
+
+  /**
+   * Get reactions for a community message
+   */
+  static async getMessageReactions(messageId: string): Promise<Array<{
+    id: string;
+    user_id: string;
+    user_name: string;
+    created_at: string;
+  }>> {
+    try {
+      const { data, error } = await supabase
+        .from('community_message_reactions')
+        .select(`
+          id,
+          message_id,
+          user_id,
+          created_at,
+          users:user_id (
+            name
+          )
+        `)
+        .eq('message_id', messageId);
+
+      if (error) throw error;
+      
+      return (data || []).map((reaction: any) => ({
+        id: reaction.id,
+        user_id: reaction.user_id,
+        user_name: reaction.users?.name || 'Unknown User',
+        created_at: reaction.created_at
+      }));
+    } catch (err) {
+      console.error('Error fetching message reactions:', err);
+      throw new DatabaseError('Failed to fetch message reactions');
+    }
+  }
+
+  /**
    * Get unread mention count
    */
   static async getUnreadMentionCount(userId: string): Promise<number> {
@@ -307,94 +350,7 @@ export class CommunityChatService {
   }
 
   /**
-   * Toggle reaction on a community message
-   */
-  static async toggleReaction(userId: string, messageId: string): Promise<boolean> {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
-
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations?operation=toggle_reaction`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ messageId })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to toggle reaction');
-      }
-      
-      return data.reaction_added;
-    } catch (err) {
-      console.error('Error toggling community message reaction:', err);
-      throw new DatabaseError('Failed to toggle reaction');
-    }
-  }
-
-  /**
-   * Get reactions for a community message
-   */
-  static async getMessageReactions(messageId: string): Promise<Array<{
-    id: string;
-    user_id: string;
-    user_name: string;
-    created_at: string;
-  }>> {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
-
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations?operation=get_message_reactions&message_id=${messageId}`,
-        {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to fetch message reactions');
-      }
-
-      return data.reactions?.map((reaction: any) => ({
-        id: reaction.reaction_id,
-        user_id: reaction.user_id,
-        user_name: reaction.user_name,
-        created_at: reaction.created_at
-      })) || [];
-    } catch (err) {
-      console.error('Error fetching community message reactions:', err);
-      throw new DatabaseError('Failed to fetch message reactions');
-    }
-  }
-
-  /**
-   * Get community members using edge function
+   * Get community members
    */
   static async getCommunityMembers(communityId: string): Promise<Array<{
     id: string;
@@ -402,37 +358,18 @@ export class CommunityChatService {
     avatarUrl?: string;
   }>> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
+      const { data, error } = await supabase
+        .rpc('get_community_members_list', {
+          p_community_id: communityId
+        });
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations?operation=get_members&community_id=${communityId}`,
-        {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
+      if (error) throw error;
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to fetch members');
-      }
-
-      return data.members?.map((member: any) => ({
+      return (data || []).map((member: any) => ({
         id: member.user_id,
-        name: member.user_name,
+        name: member.user_name || 'Unknown User',
         avatarUrl: member.avatar_url
-      })) || [];
+      }));
     } catch (err) {
       console.error('Error fetching community members:', err);
       throw new DatabaseError('Failed to fetch community members');
@@ -440,33 +377,18 @@ export class CommunityChatService {
   }
 
   /**
-   * Verify if user is a member of a community using new Edge Function
+   * Verify if user is a member of a community
    */
   static async verifyCommunityMembership(userId: string, communityId: string): Promise<boolean> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('User not authenticated');
-      }
+      const { data, error } = await supabase
+        .rpc('verify_community_membership', {
+          p_user_id: userId,
+          p_community_id: communityId
+        });
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/community-operations?operation=verify_membership&community_id=${communityId}`,
-        {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      return data.is_member || false;
+      if (error) throw error;
+      return !!data;
     } catch (err) {
       console.error('Error verifying community membership:', err);
       return false;
