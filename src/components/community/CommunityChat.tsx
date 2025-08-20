@@ -1,5 +1,8 @@
 import { useState, useCallback, useRef } from 'react';
 import { useSupabase } from '../contexts/SupabaseContext';
+    const startTime = Date.now();
+import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
+import { CommunityCache } from '../lib/cache/CommunityCache';
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
 import { CommunityCache } from '../lib/cache/CommunityCache';
 import type { 
@@ -11,7 +14,7 @@ import type {
 
 
 export function useCommunityOperations() {
-  const { user, supabase } = useSupabase();
+  const { user } = useSupabase();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<CommunityOperationError | null>(null);
   
@@ -87,6 +90,16 @@ export function useCommunityOperations() {
           params.community_id
         );
         
+        // Track successful operation
+        CommunityAnalytics.trackPerformance(
+          operation,
+          startTime,
+          true,
+          undefined,
+          user.id,
+          params.community_id
+        );
+        
         return { success: true, data: data };
       } catch (err) {
         lastError = err as Error;
@@ -118,11 +131,21 @@ export function useCommunityOperations() {
       params.community_id
     );
     
+    // Track failed operation
+    CommunityAnalytics.trackPerformance(
+      operation,
+      startTime,
+      false,
+      lastError?.message,
+      user.id,
+      params.community_id
+    );
+    
     return { 
       success: false, 
       error: lastError?.message || 'Operation failed after retries' 
     };
-  }, [user, supabase]);
+  }, [user]);
   
   // Verify community membership with caching
   const verifyCommunityMembership = useCallback(async (
@@ -238,8 +261,7 @@ export function useCommunityOperations() {
   
   // Toggle message reaction
   const toggleMessageReaction = useCallback(async (
-    messageId: string,
-    emoji: string
+    messageId: string
   ): Promise<CommunityOperationResult<{ reaction_added: boolean }>> => {
     setLoading(true);
     setError(null);
@@ -247,33 +269,6 @@ export function useCommunityOperations() {
     try {
       const result = await callEdgeFunction<{ reaction_added: boolean }>(
         'toggle_reaction',
-        { message_id: messageId, emoji: emoji },
-        'POST'
-      );
-      
-      if (result.success) {
-        // Invalidate reactions cache
-        const cacheKey = `reactions_${messageId}`;
-        CommunityCache.delete(cacheKey);
-      }
-      
-      return result;
-    } catch (err) {
-      const error = err as CommunityOperationError;
-      setError(error);
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
-    }
-  }, [callEdgeFunction]);
-  
-  // Clear cache
-  const clearCache = useCallback(() => {
-    CommunityCache.clear();
-  }, []);
-  
-  return {
-    loading,
     error,
     verifyCommunityMembership,
     getCommunityMembers,
