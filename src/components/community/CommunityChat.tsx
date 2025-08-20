@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
 import { useSupabase } from '../contexts/SupabaseContext';
-    const startTime = Date.now();
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
 import { CommunityCache } from '../lib/cache/CommunityCache';
 import { CommunityAnalytics } from '../lib/monitoring/CommunityAnalytics';
@@ -14,7 +13,7 @@ import type {
 
 
 export function useCommunityOperations() {
-  const { user } = useSupabase();
+  const { user, supabase } = useSupabase();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<CommunityOperationError | null>(null);
   
@@ -145,7 +144,7 @@ export function useCommunityOperations() {
       success: false, 
       error: lastError?.message || 'Operation failed after retries' 
     };
-  }, [user]);
+  }, [user, supabase]);
   
   // Verify community membership with caching
   const verifyCommunityMembership = useCallback(async (
@@ -266,6 +265,9 @@ export function useCommunityOperations() {
     setLoading(true);
     setError(null);
     
+    try {
+      const result = await callEdgeFunction<{ reaction_added: boolean }>(
+        'toggle_message_reaction',
         { messageId },
         'POST'
       );
